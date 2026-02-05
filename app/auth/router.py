@@ -18,6 +18,7 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    user: dict | None = None
 
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: LoginRequest, session: AsyncSession = Depends(get_session)):
@@ -33,16 +34,19 @@ async def login(payload: LoginRequest, session: AsyncSession = Depends(get_sessi
     if not verify_password(payload.password, stored):
         raise Unauthorized("Invalid credentials")
 
-    # If legacy/plain password, upgrade to bcrypt
-    if stored and not (stored.startswith("$2a$") or stored.startswith("$2b$") or stored.startswith("$2y$")):
+    # If plain password, upgrade to bcrypt
+    if stored and not (stored.startswith("$argon2$")):
         hashed = hash_password(payload.password)
         await session.execute(update(users).where(users.c.id == user_dict["id"]).values(password=hashed))
         await session.commit()
 
     token = create_access_token(str(user_dict["id"]), extra={"role": user_dict.get("user_role")})
-    return TokenResponse(access_token=token)
+    safe_user = {k: v for k, v in user_dict.items() if k not in {"password"}}
+    return TokenResponse(access_token=token, user=safe_user)
 
+# Endpoint to verify token and return user info
 @router.get("/me")
 async def me(current_user=Depends(get_current_user)):
-    safe = {k: v for k, v in current_user.items() if k not in {"password"}}
-    return safe
+    # Return user info without sensitive fields
+    safe_user = {k: v for k, v in current_user.items() if k not in {"password"}}
+    return safe_user

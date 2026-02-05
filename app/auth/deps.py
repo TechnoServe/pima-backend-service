@@ -13,15 +13,18 @@ from app.auth.rbac import is_admin
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.api_prefix}/auth/login")
 
+# Get current user from token, and verify against DB
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
     session: AsyncSession = Depends(get_session),
 ):
+    # First decode the token to get user ID and role (if present)
     try:
         payload = decode_token(token)
     except Exception:
         raise Unauthorized("Invalid token")
 
+    # Get user ID from payload and fetch user from DB to verify token is valid and user still exists
     user_id = payload.get("sub")
     if not user_id:
         raise Unauthorized("Invalid token")
@@ -32,6 +35,7 @@ async def get_current_user(
     if not row:
         raise Unauthorized("User not found")
 
+    # Convert SQLAlchemy row to dict
     user = row[0] if isinstance(row, tuple) else row
     user_dict = dict(user._mapping) if hasattr(user, "_mapping") else dict(user)
     return user_dict

@@ -6,13 +6,16 @@ from passlib.context import CryptContext
 
 from app.core.config import settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(
+    schemes=["argon2"],
+    deprecated="auto",
+)
 
 def verify_password(plain: str, hashed: str) -> bool:
     if not hashed:
         return False
-    # Support legacy/plain passwords if present.
-    if hashed.startswith("$2a$") or hashed.startswith("$2b$") or hashed.startswith("$2y$"):
+    # Support plain passwords if present.
+    if hashed.startswith("$argon2"):
         return pwd_context.verify(plain, hashed)
     return plain == hashed
 

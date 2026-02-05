@@ -6,3 +6,5 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 pydantic==2.9.2
 pydantic-settings==2.6.1
+geoalchemy2==0.18.1
+argon2_cffi==21.3.0

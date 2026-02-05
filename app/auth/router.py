@@ -40,6 +40,21 @@ def _normalize_status(value) -> str:
     normalized = (str(value or "").strip().lower())
     return "inactive" if normalized in {"inactive", "in_active", "disabled"} else "active"
 
+
+def _to_iso(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def _normalize_status(value) -> str:
+    normalized = (str(value or "").strip().lower())
+    return "inactive" if normalized in {"inactive", "in_active", "disabled"} else "active"
+
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: LoginRequest, session: AsyncSession = Depends(get_session)):
     users = get_table("users")
@@ -81,6 +96,7 @@ async def get_my_projects(
     farmer_groups = get_table("farmer_groups")
     farmers = get_table("farmers")
     project_staff_roles = get_table("project_staff_roles")
+    locations = get_table("locations")
 
     farmers_counts_stmt = (
         select(
@@ -108,7 +124,10 @@ async def get_my_projects(
         if row.project_id is not None
     }
 
-    project_stmt = select(projects)
+    project_stmt = (
+        select(projects, locations.c.name.label("location_name"))
+        .select_from(projects.outerjoin(locations, projects.c.location_id == locations.c.id))
+    )
     if not is_admin(current_user.get("user_role")):
         allowed = accessible_project_ids or []
         if not allowed:
@@ -118,14 +137,15 @@ async def get_my_projects(
     project_rows = (await session.execute(project_stmt)).all()
     response: list[ProjectSummaryRead] = []
     for row in project_rows:
-        project = row[0] if isinstance(row, tuple) else row
+        project = row[0]
         project_dict = dict(project._mapping) if hasattr(project, "_mapping") else dict(project)
+        location_name = row._mapping.get("location_name")
         project_id = str(project_dict.get("id", ""))
         response.append(
             ProjectSummaryRead(
                 id=project_id,
                 name=str(project_dict.get("name") or project_dict.get("project_name") or ""),
-                country=str(project_dict.get("country") or ""),
+                country=str(location_name or project_dict.get("country") or ""),
                 status=_normalize_status(project_dict.get("status")),
                 startDate=_to_iso(project_dict.get("start_date")),
                 endDate=_to_iso(project_dict.get("end_date")) or None,

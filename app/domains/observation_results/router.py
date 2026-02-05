@@ -1,0 +1,7 @@
+from app.shared.domain_factory import build_crud_router
+
+router = build_crud_router(
+    entity="observation_results",
+    tags=["observation_results"],
+    require_project_scope=False,
+)

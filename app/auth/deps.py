@@ -47,10 +47,11 @@ async def get_accessible_project_ids(
     if is_admin(current_user.get("user_role")):
         return None  # means unrestricted
     psr = get_table("project_staff_roles")
-    # status might be enum; assume 'Active'
-    stmt = select(psr.c.project_id).where(psr.c.user_id == current_user["id"])
-    if "status" in psr.c:
-        stmt = stmt.where(psr.c.status == "Active")
+    
+    # Get all projects active or not for now. 
+    stmt = select(psr.c.project_id).where(psr.c.staff_id == current_user["id"])
+    # .where(psr.c.status == "Active")
+    
     res = await session.execute(stmt)
     return [r[0] for r in res.fetchall()]
 

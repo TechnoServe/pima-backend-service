@@ -125,7 +125,7 @@ async def get_my_projects(
     }
 
     project_stmt = (
-        select(projects, locations.c.name.label("location_name"))
+        select(projects, locations.c.location_name.label("location_name"))
         .select_from(projects.outerjoin(locations, projects.c.location_id == locations.c.id))
     )
     if not is_admin(current_user.get("user_role")):
@@ -135,11 +135,11 @@ async def get_my_projects(
         project_stmt = project_stmt.where(projects.c.id.in_(allowed))
 
     project_rows = (await session.execute(project_stmt)).all()
+    print(project_rows)
     response: list[ProjectSummaryRead] = []
-    for row in project_rows:
-        project = row[0]
-        project_dict = dict(project._mapping) if hasattr(project, "_mapping") else dict(project)
-        location_name = row._mapping.get("location_name")
+    for project in project_rows:
+        project_dict = dict(project._mapping) if hasattr(project, "_mapping") else project
+        location_name = project._mapping.get("location_name")
         project_id = str(project_dict.get("id", ""))
         response.append(
             ProjectSummaryRead(

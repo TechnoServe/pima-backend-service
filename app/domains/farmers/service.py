@@ -383,8 +383,8 @@ class FarmersService:
         for err in base_validation.errors:
             issues.append({"row_number": 1, "field": err.column or "header", "error_type": err.type, "message": err.message})
 
-        if issues:
-            return issues
+        # if issues:
+            # return issues
 
         wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
         ws = wb.active

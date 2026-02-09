@@ -38,3 +38,10 @@ def signed_get_url(object_name: str, expires_seconds: int = 3600) -> str:
         expiration=timedelta(seconds=expires_seconds),
         method="GET",
     )
+
+
+def download_bytes(object_name: str) -> bytes:
+    client = get_storage_client()
+    bucket = client.bucket(settings.gcs_bucket_name)
+    blob = bucket.blob(object_name)
+    return blob.download_as_bytes()

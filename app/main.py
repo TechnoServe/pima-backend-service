@@ -1,11 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.api.router import router as api_router
 from app.db.session import engine
 from app.db.reflection import reflect_tables
+from app.domains.farmers.upload_worker import uploads_cron_loop
 
 TABLES = [
     "users",
@@ -62,6 +64,13 @@ def create_app() -> FastAPI:
         print("Reflecting database tables...")
         await reflect_tables(engine, TABLES, schema=settings.db_schema)
         print("Database tables reflected successfully.")
+        app.state.farmers_upload_worker = asyncio.create_task(uploads_cron_loop())
+
+    @app.on_event("shutdown")
+    async def _shutdown():
+        task = getattr(app.state, "farmers_upload_worker", None)
+        if task:
+            task.cancel()
 
     @app.get("/health")
     async def health():

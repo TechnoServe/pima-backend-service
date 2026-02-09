@@ -236,14 +236,10 @@ class FarmersRepository:
         age_col = Farmer.c.age if "age" in Farmer.c else literal(None)
         phone_col = Farmer.c.phone_number if "phone_number" in Farmer.c else literal(None)
 
-        # optional fields in your csv (if missing in DB -> None)
-        # Shared household values: all farmers in same household export same values.
-        coffee_tree_numbers_col = Household.c.number_of_trees if "number_of_trees" in Household.c else literal(None)
-        number_of_coffee_plots_col = (
-            Household.c.farm_size
-            if "farm_size" in Household.c
-            else (Household.c.number_of_coffee_plots if "number_of_coffee_plots" in Household.c else literal(None))
-        )
+
+        coffee_tree_numbers_col = Household.c.number_of_trees
+        number_of_coffee_plots_col = Household.c.farm_size
+    
         coop_membership_col = (
             Farmer.c.coop_membership_number if "coop_membership_number" in Farmer.c else literal(None)
         )
@@ -266,11 +262,8 @@ class FarmersRepository:
         ba_id_col = col(BA, "id")
         ba_name_col = name_expr(BA).label("business_advisor")
 
-        create_in_commcare_col = (
-            Farmer.c.create_in_commcare
-            if "create_in_commcare" in Farmer.c
-            else (Farmer.c.create_in_commcare_flag if "create_in_commcare_flag" in Farmer.c else literal(None))
-        )
+        create_in_commcare_col = Farmer.c.send_to_commcare
+            
 
         is_primary_col = Farmer.c.is_primary_household_member if "is_primary_household_member" in Farmer.c else literal(None)
         updated_at_col = Farmer.c.updated_at if "updated_at" in Farmer.c else literal(None)

@@ -171,6 +171,7 @@ class FarmersService:
             "gender",
             "age",
             "coffee_tree_numbers",
+            "number_of_coffee_plots",
             "phone_number",
             "coop_membership_number",
             "location",

@@ -399,7 +399,12 @@ class FarmersService:
             "primary_delta": defaultdict(int),
         }
 
-        for row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        rows = list(ws.iter_rows(min_row=2, values_only=True))
+
+        # Pre-adjust context for all farmers in the file first, so validation is not row-order dependent.
+        await self._prepare_validation_ctx(run=run, rows=rows, header_idx=header_idx, validation_ctx=validation_ctx)
+
+        for row_number, row in enumerate(rows, start=2):
             row_issues = await self._validate_row_constraints(
                 run=run,
                 row_number=row_number,
@@ -410,6 +415,33 @@ class FarmersService:
             issues.extend(row_issues)
 
         return issues
+
+    async def _prepare_validation_ctx(self, *, run: UploadRun, rows: list, header_idx: dict[str, int], validation_ctx: dict) -> None:
+        for row in rows:
+            farmer_identifier = str(self._cell(row, header_idx, "farmer_sf_id") or "").strip()
+            if not farmer_identifier:
+                continue
+            from_sf_raw = self._cell(row, header_idx, "from_sf")
+            from_sf = None if from_sf_raw in (None, "") else str(from_sf_raw).strip().lower() in ("1", "true", "yes")
+
+            farmer_data = await self.repo.resolve_farmer_for_project(
+                project_id=run.project_id,
+                identifier=farmer_identifier,
+                from_sf=from_sf,
+            )
+            if not farmer_data:
+                continue
+
+            farmer_id, _ = farmer_data
+            if farmer_id in validation_ctx["prepared_farmers"]:
+                continue
+
+            validation_ctx["prepared_farmers"].add(farmer_id)
+            current_household_id, current_is_primary = await self.repo.get_farmer_current_state(farmer_id=farmer_id)
+            if current_household_id:
+                validation_ctx["member_delta"][current_household_id] -= 1
+                if current_is_primary:
+                    validation_ctx["primary_delta"][current_household_id] -= 1
 
     async def _validate_row_constraints(self, *, run: UploadRun, row_number: int, row, header_idx: dict[str, int], validation_ctx: dict) -> list[dict]:
         issues: list[dict] = []
@@ -438,14 +470,6 @@ class FarmersService:
         if farmer_id in validation_ctx["assigned_farmers"]:
             add("farmer_sf_id", "Farmer appears multiple times in the same upload")
             return issues
-
-        current_household_id, current_is_primary = await self.repo.get_farmer_current_state(farmer_id=farmer_id)
-        if farmer_id not in validation_ctx["prepared_farmers"]:
-            validation_ctx["prepared_farmers"].add(farmer_id)
-            if current_household_id:
-                validation_ctx["member_delta"][current_household_id] -= 1
-                if current_is_primary:
-                    validation_ctx["primary_delta"][current_household_id] -= 1
 
         if not ffg_id:
             add("ffg_id", "Missing ffg_id")

@@ -75,7 +75,7 @@ class FarmersFilterOptions(BaseModel):
     business_advisors: List[FilterOption]
 
 # --- Uploads ---
-UploadStatus = Literal["uploading","validating","processing","completed","failed","cancelled"]
+UploadStatus = Literal["uploading","validating","validation_errored","processing","completed","failed","cancelled"]
 
 class UploadJob(BaseModel):
     id: UUID

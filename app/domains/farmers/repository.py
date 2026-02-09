@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional, Tuple, List, Dict
-from uuid import UUID
+import uuid
 
 from sqlalchemy import select, func, or_, desc, asc, update, insert, literal, case
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -166,6 +166,22 @@ class FarmersRepository:
 
         return rows, total
 
+    async def summary(self, project_id: UUID) -> dict:
+        Farmer = T("farmers")
+        FarmerGroup = T("farmer_groups")
+
+        q = (
+            select(
+                func.count().label("total"),
+                func.sum(case((Farmer.c.send_to_commcare.is_(True), 1), else_=0)).label("pending_commcare"),
+            )
+            .select_from(Farmer)
+            .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
+            .where(FarmerGroup.c.project_id == project_id, Farmer.c.is_deleted.is_(False))
+        )
+
+        res = await self.db.execute(q)
+        return res.mappings().first() or {"total": 0, "pending_commcare": 0}
     # ---------------- Export: training modules ----------------
     async def export_training_modules(self, project_id: UUID) -> List[dict]:
         TrainingModule = T("training_modules")
@@ -307,7 +323,7 @@ class FarmersRepository:
             .outerjoin(FT, fg_responsible_col == ft_id_col)
             .outerjoin(BA, col(FT, "manager_id") == ba_id_col)
             .where(FarmerGroup.c.project_id == project_id, Farmer.c.is_deleted.is_(False))
-            .order_by(desc(updated_at_col))
+            .order_by(asc(farmer_tns_col))
         )
 
         return (await self.db.execute(q)).mappings().all()
@@ -447,7 +463,7 @@ class FarmersRepository:
     async def latest_session_id_for_group_module(self, *, farmer_group_id: UUID, module_id: UUID) -> UUID | None:
         TrainingSession = T("training_sessions")
 
-        q = select(TrainingSession.c.id).where(TrainingSession.c.training_module_id == module_id)
+        q = select(TrainingSession.c.id).where(TrainingSession.c.module_id == module_id)
         if "farmer_group_id" in TrainingSession.c:
             q = q.where(TrainingSession.c.farmer_group_id == farmer_group_id)
 
@@ -471,14 +487,22 @@ class FarmersRepository:
         Farmer = T("farmers")
         await self.db.execute(update(Farmer).where(Farmer.c.id == farmer_id).values(**values))
 
-    async def upsert_attendance(self, *, project_id: UUID, farmer_id: UUID, session_id: UUID, values: dict, attendance_id: UUID | None) -> None:
+    async def upsert_attendance(self, *, project_id: UUID, farmer_id: UUID, session_id: UUID, values: dict, attendance_id: UUID | None, updated_by) -> None:
         Attendance = T("attendances")
         if attendance_id:
             if values:
                 await self.db.execute(update(Attendance).where(Attendance.c.id == attendance_id).values(**values))
             return
 
-        ins = {"farmer_id": farmer_id, "training_session_id": session_id, **values}
+        ins = {
+            "farmer_id":farmer_id, 
+            "training_session_id": session_id, 
+            **values, "id": uuid.uuid4(), 
+            "created_by_id": updated_by, 
+            "last_updated_by_id": updated_by,
+            "created_at": func.now(),
+            "updated_at": func.now(),
+        }
         if "project_id" in Attendance.c:
             ins["project_id"] = project_id
         await self.db.execute(insert(Attendance).values(**ins))

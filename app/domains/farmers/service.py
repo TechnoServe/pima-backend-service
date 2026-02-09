@@ -296,10 +296,11 @@ class FarmersService:
     ) -> UploadJob:
         """Persist upload metadata and file, then queue processing."""
         active = await self.repo.get_active_upload(project_id=project_id)
-        if active:
-            raise ConflictError("An upload is already in progress for this project.")
+        # if active:
+        #     raise ConflictError("An upload is already in progress for this project.")
 
         try:
+            print("Uploading file to storage...")
             gcs = upload_bytes(
                 project_id=str(project_id),
                 category="farmer-uploads",
@@ -307,6 +308,7 @@ class FarmersService:
                 content=file_bytes,
                 content_type=content_type,
             )
+            print(f"File uploaded to {gcs['gcs_uri']}")
         except Exception as exc:
             raise ExternalServiceError("Failed to upload file to storage", details={"reason": str(exc)}) from exc
 
@@ -327,7 +329,9 @@ class FarmersService:
             uploaded_by_id=uploaded_by_id,
             uploaded_at=datetime.utcnow(),
         )
+        print("Creating upload run in database...")
         run = await self.repo.create_upload_run(run)
+        print(f"Upload run created with ID {run.id}, queuing processing...")
         return await self.get_upload_job(run.id)
 
     async def process_upload_run(self, *, upload_run_id: UUID, file_bytes: bytes | None = None) -> None:
@@ -336,92 +340,94 @@ class FarmersService:
         if not run or run.status in {"completed", "failed", "cancelled"}:
             return
 
-        try:
-            run.status = "validating"
-            run.progress = 5
-            await self.db.commit()
+        # try:
+        run.status = "validating"
+        run.progress = 5
+        await self.db.commit()
 
-            if file_bytes is None:
-                if not run.gcs_object_name:
-                    raise ValidationError("Uploaded file location is missing")
-                file_bytes = download_bytes(run.gcs_object_name)
+        if file_bytes is None:
+            if not run.gcs_object_name:
+                raise ValidationError("Uploaded file location is missing")
+            file_bytes = download_bytes(run.gcs_object_name)
 
-            validation = self.validate_upload(file_bytes=file_bytes)
-            if not validation.is_valid:
-                await self._fail_run(run, message="Uploaded file failed validation", failed_rows=validation.total_rows)
-                return
+        validation = self.validate_upload(file_bytes=file_bytes)
+        if not validation.is_valid:
+            await self._fail_run(run, message="Uploaded file failed validation", failed_rows=validation.total_rows)
+            return
 
-            wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
-            ws = wb.active
-            headers = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
-            header_idx = {h.strip().lower(): i for i, h in enumerate(headers)}
+        wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+        ws = wb.active
+        headers = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        header_idx = {h.strip().lower(): i for i, h in enumerate(headers)}
 
-            module_cols: list[tuple[int, str]] = []
-            for i, header in enumerate(headers):
-                parts = (header or "").strip().split("-")
-                if len(parts) >= 3:
-                    module_cols.append((i, parts[-1].strip()))
+        module_cols: list[tuple[int, str]] = []
+        for i, header in enumerate(headers):
+            parts = (header or "").strip().split("-")
+            if len(parts) >= 3:
+                module_cols.append((i, parts[-1].strip()))
 
-            modules = await self.repo.export_training_modules(run.project_id)
-            module_uuid_by_key: Dict[str, UUID] = {str(m.get("sf_id") or m["id"]): m["id"] for m in modules}
+        modules = await self.repo.export_training_modules(run.project_id)
+        module_uuid_by_key: Dict[str, UUID] = {str(m.get("sf_id") or m["id"]): m["id"] for m in modules}
 
-            run.total_rows = max((ws.max_row - 1 if ws.max_row else 0), 0)
-            run.remaining_count = run.total_rows
-            run.status = "processing"
-            run.progress = 10
-            await self.db.commit()
+        run.total_rows = max((ws.max_row - 1 if ws.max_row else 0), 0)
+        run.remaining_count = run.total_rows
+        run.status = "processing"
+        run.progress = 10
+        await self.db.commit()
 
-            row_errors: list[UploadRowError] = []
-            success_count = 0
-            failed_count = 0
+        row_errors: list[UploadRowError] = []
+        success_count = 0
+        failed_count = 0
 
-            for row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-                try:
-                    await self._process_single_row(
-                        run=run,
+        for row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+            try:
+                await self._process_single_row(
+                    run=run,
+                    row_number=row_number,
+                    row=row,
+                    headers=headers,
+                    header_idx=header_idx,
+                    module_cols=module_cols,
+                    module_uuid_by_key=module_uuid_by_key,
+                    row_errors=row_errors,
+                )
+                success_count += 1
+            except Exception as exc:
+                print(f"Error processing row {row_number}: {exc}")
+                failed_count += 1
+                row_errors.append(
+                    UploadRowError(
+                        upload_run_id=run.id,
                         row_number=row_number,
-                        row=row,
-                        headers=headers,
-                        header_idx=header_idx,
-                        module_cols=module_cols,
-                        module_uuid_by_key=module_uuid_by_key,
-                        row_errors=row_errors,
+                        farmer_id=None,
+                        tns_id=str(self._cell(row, header_idx, "tns_id") or ""),
+                        error_type="row_error",
+                        error_message=str(exc),
+                        raw_row={headers[i]: row[i] for i in range(min(len(headers), len(row)))},
                     )
-                    success_count += 1
-                except Exception as exc:
-                    failed_count += 1
-                    row_errors.append(
-                        UploadRowError(
-                            upload_run_id=run.id,
-                            row_number=row_number,
-                            farmer_id=None,
-                            tns_id=str(self._cell(row, header_idx, "tns_id") or ""),
-                            error_type="row_error",
-                            error_message=str(exc),
-                            raw_row={headers[i]: row[i] for i in range(min(len(headers), len(row)))},
-                        )
-                    )
+                )
 
-                processed = success_count + failed_count
-                run.success_count = success_count
-                run.failed_count = failed_count
-                run.remaining_count = max(run.total_rows - processed, 0)
-                run.progress = min(95, 10 + int((processed / max(run.total_rows, 1)) * 85))
-                if processed % 25 == 0:
-                    await self.db.commit()
-
-            if row_errors:
-                await self.repo.bulk_add_row_errors(row_errors)
-
+            processed = success_count + failed_count
             run.success_count = success_count
             run.failed_count = failed_count
-            run.remaining_count = 0
-            run.progress = 100
-            run.status = "failed" if failed_count > 0 else "completed"
-            run.completed_at = datetime.utcnow()
-            await self.db.commit()
-        except Exception as exc:
-            await self._fail_run(run, message=str(exc))
+            run.remaining_count = max(run.total_rows - processed, 0)
+            run.progress = min(95, 10 + int((processed / max(run.total_rows, 1)) * 85))
+            if processed % 25 == 0:
+                await self.db.commit()
+
+        if row_errors:
+            await self.repo.bulk_add_row_errors(row_errors)
+
+        run.success_count = success_count
+        run.failed_count = failed_count
+        run.remaining_count = 0
+        run.progress = 100
+        run.status = "failed" if failed_count > 0 else "completed"
+        run.completed_at = datetime.utcnow()
+        await self.db.commit()
+        # except Exception as exc:
+        #     print(f"Error processing upload run {upload_run_id}: {exc}")
+        #     await self._fail_run(run, message=str(exc))
 
     async def _process_single_row(
         self,
@@ -519,6 +525,7 @@ class FarmersService:
                 session_id=session_id,
                 values=attendance_values,
                 attendance_id=attendance_id,
+                updated_by=run.uploaded_by_id,
             )
 
     def _build_farmer_updates(self, *, row, header_idx: dict[str, int], from_sf: bool | None) -> dict:
@@ -548,6 +555,8 @@ class FarmersService:
                 continue
             if column == "age":
                 value = int(value)
+            if column == 'phone_number':
+                value = str(value).strip()
             elif column == "create_in_commcare":
                 value = str(value).strip().lower() in ("1", "true", "yes")
             updates[column] = value

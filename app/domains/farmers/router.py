@@ -4,7 +4,7 @@ import inspect
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
@@ -225,6 +225,33 @@ async def get_failed_rows(upload_id: UUID, db: AsyncSession = Depends(get_sessio
 
 
 
+
+
+
+@uploads_router.get("/{upload_id}/original-file")
+async def get_original_file(upload_id: UUID, db: AsyncSession = Depends(get_session), user=Depends(get_current_user)):
+    svc = FarmersService(db)
+    job = await _service_call(svc.get_upload_job(upload_id))
+    await _maybe_await(require_project_access(db, user, job.project_id))
+    content, content_type, filename = await _service_call(svc.get_upload_original_file_bytes(upload_id))
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@uploads_router.get("/{upload_id}/error-report")
+async def get_error_report(upload_id: UUID, db: AsyncSession = Depends(get_session), user=Depends(get_current_user)):
+    svc = FarmersService(db)
+    job = await _service_call(svc.get_upload_job(upload_id))
+    await _maybe_await(require_project_access(db, user, job.project_id))
+    content, content_type, filename = await _service_call(svc.get_upload_error_report_bytes(upload_id))
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 @uploads_router.post("/{upload_id}/reupload", response_model=UploadJob)
 async def reupload_file(

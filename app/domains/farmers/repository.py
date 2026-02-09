@@ -523,6 +523,16 @@ class FarmersRepository:
         stmt = insert(Household).values(**values).returning(Household.c.id)
         return (await self.db.execute(stmt)).scalar_one()
 
+
+    async def get_farmer_current_state(self, *, farmer_id: UUID) -> tuple[UUID | None, bool | None]:
+        Farmer = T("farmers")
+        primary_col = Farmer.c.is_primary_household_member if "is_primary_household_member" in Farmer.c else literal(None)
+        q = select(Farmer.c.household_id, primary_col).where(Farmer.c.id == farmer_id).limit(1)
+        row = (await self.db.execute(q)).first()
+        if not row:
+            return None, None
+        return row[0], row[1]
+
     async def count_household_members(self, *, household_id: UUID, exclude_farmer_id: UUID | None = None) -> int:
         Farmer = T("farmers")
         q = select(func.count()).where(Farmer.c.household_id == household_id, Farmer.c.is_deleted.is_(False))

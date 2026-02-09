@@ -329,6 +329,7 @@ class FarmersService:
         parent_upload_id: UUID | None,
     ) -> UploadRun:
         try:
+            print("Uploading file to storage...")
             gcs = upload_bytes(
                 project_id=str(project_id),
                 category="farmer-uploads",
@@ -336,6 +337,7 @@ class FarmersService:
                 content=file_bytes,
                 content_type=content_type,
             )
+            print(f"File uploaded to {gcs['gcs_uri']}")
         except Exception as exc:
             raise ExternalServiceError("Failed to upload file to storage", details={"reason": str(exc)}) from exc
 
@@ -837,6 +839,7 @@ class FarmersService:
                 session_id=session_id,
                 values=attendance_values,
                 attendance_id=attendance_id,
+                updated_by=run.uploaded_by_id,
             )
 
     def _build_farmer_updates(self, *, row, header_idx: dict[str, int], from_sf: bool | None) -> dict:
@@ -865,6 +868,8 @@ class FarmersService:
                 continue
             if column == "age":
                 value = int(value)
+            if column == 'phone_number':
+                value = str(value).strip()
             elif column == "create_in_commcare":
                 value = str(value).strip().lower() in ("1", "true", "yes")
             updates[column] = value

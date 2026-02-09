@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional, Tuple, List, Dict
 from uuid import UUID
 
-from sqlalchemy import select, func, or_, desc, asc, update, literal, case
+from sqlalchemy import select, func, or_, desc, asc, update, insert, literal, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import alias
 
@@ -389,6 +389,99 @@ class FarmersRepository:
             out[(sfid, key)] = 1 if (cur == 1 or to_bool(r)) else 0
 
         return out
+
+    # ---------------- Upload processing helpers ----------------
+    async def resolve_farmer_for_project(
+        self,
+        *,
+        project_id: UUID,
+        identifier: str,
+        from_sf: bool | None,
+    ) -> tuple[UUID, UUID] | None:
+        Farmer = T("farmers")
+        FarmerGroup = T("farmer_groups")
+        def _query(match_col):
+            return (
+                select(Farmer.c.id, Farmer.c.farmer_group_id)
+                .select_from(Farmer)
+                .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
+                .where(
+                    match_col == identifier,
+                    FarmerGroup.c.project_id == project_id,
+                    Farmer.c.is_deleted.is_(False),
+                )
+                .limit(1)
+            )
+
+        query_order = []
+        if from_sf is True and "sf_id" in Farmer.c:
+            query_order = [Farmer.c.sf_id, Farmer.c.id]
+        elif from_sf is False:
+            query_order = [Farmer.c.id] + ([Farmer.c.sf_id] if "sf_id" in Farmer.c else [])
+        else:
+            query_order = ([Farmer.c.sf_id] if "sf_id" in Farmer.c else []) + [Farmer.c.id]
+
+        for match_col in query_order:
+            row = (await self.db.execute(_query(match_col))).first()
+            if row:
+                return row[0], row[1]
+        return None
+
+    async def resolve_household_id(self, *, identifier: str, from_sf: bool | None) -> UUID | None:
+        Household = T("households")
+        order = []
+        if from_sf is True and "sf_id" in Household.c:
+            order = [Household.c.sf_id, Household.c.id]
+        elif from_sf is False:
+            order = [Household.c.id] + ([Household.c.sf_id] if "sf_id" in Household.c else [])
+        else:
+            order = ([Household.c.sf_id] if "sf_id" in Household.c else []) + [Household.c.id]
+
+        for col_match in order:
+            q = select(Household.c.id).where(col_match == identifier).limit(1)
+            val = (await self.db.execute(q)).scalar_one_or_none()
+            if val:
+                return val
+        return None
+
+    async def latest_session_id_for_group_module(self, *, farmer_group_id: UUID, module_id: UUID) -> UUID | None:
+        TrainingSession = T("training_sessions")
+
+        q = select(TrainingSession.c.id).where(TrainingSession.c.training_module_id == module_id)
+        if "farmer_group_id" in TrainingSession.c:
+            q = q.where(TrainingSession.c.farmer_group_id == farmer_group_id)
+
+        order_col = TrainingSession.c.training_date if "training_date" in TrainingSession.c else TrainingSession.c.created_at
+        q = q.order_by(order_col.desc()).limit(1)
+
+        return (await self.db.execute(q)).scalar_one_or_none()
+
+    async def attendance_id(self, *, project_id: UUID, farmer_id: UUID, session_id: UUID) -> UUID | None:
+        Attendance = T("attendances")
+
+        q = select(Attendance.c.id).where(
+            Attendance.c.farmer_id == farmer_id,
+            Attendance.c.training_session_id == session_id,
+        )
+        if "project_id" in Attendance.c:
+            q = q.where(Attendance.c.project_id == project_id)
+        return (await self.db.execute(q.limit(1))).scalar_one_or_none()
+
+    async def update_farmer(self, *, farmer_id: UUID, values: dict) -> None:
+        Farmer = T("farmers")
+        await self.db.execute(update(Farmer).where(Farmer.c.id == farmer_id).values(**values))
+
+    async def upsert_attendance(self, *, project_id: UUID, farmer_id: UUID, session_id: UUID, values: dict, attendance_id: UUID | None) -> None:
+        Attendance = T("attendances")
+        if attendance_id:
+            if values:
+                await self.db.execute(update(Attendance).where(Attendance.c.id == attendance_id).values(**values))
+            return
+
+        ins = {"farmer_id": farmer_id, "training_session_id": session_id, **values}
+        if "project_id" in Attendance.c:
+            ins["project_id"] = project_id
+        await self.db.execute(insert(Attendance).values(**ins))
 
     # ---------------- CommCare flagging ----------------
     async def flag_farmers_send_to_commcare(self, *, project_id: UUID) -> int:

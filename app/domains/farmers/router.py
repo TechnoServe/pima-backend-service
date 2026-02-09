@@ -12,6 +12,7 @@ from app.db.session import get_session
 from app.auth.deps import get_current_user, require_project_access
 
 from app.shared.domain_factory import build_crud_router
+from app.shared.api_errors import DomainError
 from .service import FarmersService, before_update
 
 from .schemas import (
@@ -31,6 +32,16 @@ async def _maybe_await(x):
     if inspect.isawaitable(x):
         return await x
     return x
+
+
+async def _service_call(call):
+    try:
+        return await _maybe_await(call)
+    except DomainError as exc:
+        detail = {"code": exc.code, "message": exc.message}
+        if exc.details:
+            detail["details"] = exc.details
+        raise HTTPException(status_code=exc.status_code, detail=detail) from exc
 
 
 crud_router = build_crud_router(
@@ -61,7 +72,7 @@ async def list_farmers(
     user=Depends(get_current_user),
 ):
     await _maybe_await(require_project_access(db, user, project_id))
-    return await FarmersService(db).list_farmers(
+    return await _service_call(FarmersService(db).list_farmers(
         project_id=project_id,
         page=page,
         page_size=page_size,
@@ -74,7 +85,7 @@ async def list_farmers(
         has_pending_commcare=has_pending_commcare,
         sort_by=sort_by,
         sort_order=sort_order,
-    )
+    ))
 
 
 @farmers_ext_router.get("/summary", response_model=FarmersSummaryResponse)
@@ -84,7 +95,7 @@ async def farmers_summary(
     user=Depends(get_current_user),
 ):
     await _maybe_await(require_project_access(db, user, project_id))
-    return await FarmersService(db).summary(project_id=project_id)
+    return await _service_call(FarmersService(db).summary(project_id=project_id))
 
 
 @farmers_ext_router.get("/filters", response_model=FarmersFilterOptions)
@@ -94,7 +105,7 @@ async def farmers_filters(
     user=Depends(get_current_user),
 ):
     await _maybe_await(require_project_access(db, user, project_id))
-    return await FarmersService(db).filter_options(project_id=project_id)
+    return await _service_call(FarmersService(db).filter_options(project_id=project_id))
 
 
 @farmers_ext_router.get("/export.xlsx")
@@ -104,7 +115,7 @@ async def export_farmers_excel(
     user=Depends(get_current_user),
 ):
     await _maybe_await(require_project_access(db, user, project_id))
-    data = await FarmersService(db).export_excel(project_id=project_id)
+    data = await _service_call(FarmersService(db).export_excel(project_id=project_id))
 
     return StreamingResponse(
         iter([data]),
@@ -124,7 +135,7 @@ async def validate_upload(
     if not (file.filename or "").lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="File must be .xlsx")
     content = await file.read()
-    return FarmersService(db).validate_upload(file_bytes=content)
+    return await _service_call(FarmersService(db).validate_upload(file_bytes=content))
 
 
 @farmers_ext_router.post("/uploads", response_model=UploadJob)
@@ -139,16 +150,15 @@ async def upload_changes(
         raise HTTPException(status_code=400, detail="File must be .xlsx")
 
     content = await file.read()
-    try:
-        return await FarmersService(db).start_upload(
+    return await _service_call(
+        FarmersService(db).start_upload(
             project_id=project_id,
             file_name=file.filename,
             content_type=file.content_type,
             file_bytes=content,
-            uploaded_by_id=user['id'],
+            uploaded_by_id=user["id"],
         )
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    )
 
 
 @farmers_ext_router.get("/uploads/active", response_model=UploadJob | None)
@@ -158,7 +168,7 @@ async def active_upload(
     user=Depends(get_current_user),
 ):
     await _maybe_await(require_project_access(db, user, project_id))
-    return await FarmersService(db).active_upload(project_id=project_id)
+    return await _service_call(FarmersService(db).active_upload(project_id=project_id))
 
 
 @farmers_ext_router.get("/uploads/history", response_model=UploadHistoryResponse)
@@ -170,7 +180,7 @@ async def uploads_history(
     user=Depends(get_current_user),
 ):
     await _maybe_await(require_project_access(db, user, project_id))
-    return await FarmersService(db).upload_history(project_id=project_id, page=page, page_size=page_size)
+    return await _service_call(FarmersService(db).upload_history(project_id=project_id, page=page, page_size=page_size))
 
 
 @farmers_ext_router.get("/send-to-commcare/count")
@@ -180,7 +190,7 @@ async def pending_commcare_count(
     user=Depends(get_current_user),
 ):
     await _maybe_await(require_project_access(db, user, project_id))
-    pending = await FarmersService(db).pending_commcare_count(project_id=project_id)
+    pending = await _service_call(FarmersService(db).pending_commcare_count(project_id=project_id))
     return {"pending": pending}
 
 
@@ -191,7 +201,7 @@ async def send_to_commcare(
     user=Depends(get_current_user),
 ):
     await _maybe_await(require_project_access(db, user, project_id))
-    flagged = await FarmersService(db).send_to_commcare(project_id=project_id)
+    flagged = await _service_call(FarmersService(db).send_to_commcare(project_id=project_id))
     return SendToCommcareResponse(flagged_count=flagged)
 
 
@@ -201,7 +211,7 @@ uploads_router = APIRouter(prefix="/farmers/uploads", tags=["farmers"])
 @uploads_router.get("/{upload_id}", response_model=UploadJob)
 async def get_upload(upload_id: UUID, db: AsyncSession = Depends(get_session), user=Depends(get_current_user)):
     svc = FarmersService(db)
-    job = await svc.get_upload_job(upload_id)
+    job = await _service_call(svc.get_upload_job(upload_id))
     await _maybe_await(require_project_access(db, user, job.project_id))
     return job
 
@@ -209,17 +219,17 @@ async def get_upload(upload_id: UUID, db: AsyncSession = Depends(get_session), u
 @uploads_router.get("/{upload_id}/failed-rows", response_model=list[FailedRow])
 async def get_failed_rows(upload_id: UUID, db: AsyncSession = Depends(get_session), user=Depends(get_current_user)):
     svc = FarmersService(db)
-    job = await svc.get_upload_job(upload_id)
+    job = await _service_call(svc.get_upload_job(upload_id))
     await _maybe_await(require_project_access(db, user, job.project_id))
-    return await svc.failed_rows(upload_id)
+    return await _service_call(svc.failed_rows(upload_id))
 
 
 @uploads_router.post("/{upload_id}/retry", response_model=UploadJob)
 async def retry_failed(upload_id: UUID, body: RetryUploadRequest, db: AsyncSession = Depends(get_session), user=Depends(get_current_user)):
     svc = FarmersService(db)
-    job = await svc.get_upload_job(upload_id)
+    job = await _service_call(svc.get_upload_job(upload_id))
     # await _maybe_await(require_project_access(db, user, job.project_id))
-    return await svc.retry_upload(upload_id=upload_id, mode=body.mode)
+    return await _service_call(svc.retry_upload(upload_id=upload_id, mode=body.mode))
 
 
 router = APIRouter()

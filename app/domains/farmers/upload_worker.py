@@ -17,7 +17,7 @@ async def run_uploads_once() -> int:
     async with SessionLocal() as db:
         q = (
             select(UploadRun.id)
-            .where(UploadRun.status == "uploading")
+            .where(UploadRun.status.in_(["uploading", "processing"]))
             .order_by(UploadRun.uploaded_at.asc())
             .limit(5)
         )

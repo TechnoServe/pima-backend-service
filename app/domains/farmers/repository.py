@@ -574,6 +574,20 @@ class FarmersRepository:
         )
         return (await self.db.execute(q)).scalars().first()
 
+
+    async def get_blocking_validation_parent(self, *, project_id: UUID) -> Optional[UploadRun]:
+        q = (
+            select(UploadRun)
+            .where(
+                UploadRun.project_id == project_id,
+                UploadRun.parent_upload_id.is_(None),
+                UploadRun.status == "validation_errored",
+            )
+            .order_by(desc(UploadRun.uploaded_at))
+            .limit(1)
+        )
+        return (await self.db.execute(q)).scalars().first()
+
     async def get_upload_run(self, upload_id: UUID) -> Optional[UploadRun]:
         return await self.db.get(UploadRun, upload_id)
 

@@ -224,6 +224,34 @@ async def get_failed_rows(upload_id: UUID, db: AsyncSession = Depends(get_sessio
     return await _service_call(svc.failed_rows(upload_id))
 
 
+
+
+@uploads_router.post("/{upload_id}/reupload", response_model=UploadJob)
+async def reupload_file(
+    upload_id: UUID,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    if not (file.filename or "").lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="File must be .xlsx")
+
+    svc = FarmersService(db)
+    parent = await _service_call(svc.get_upload_job(upload_id))
+    await _maybe_await(require_project_access(db, user, parent.project_id))
+
+    content = await file.read()
+    return await _service_call(
+        svc.reupload_to_run(
+            upload_id=upload_id,
+            file_name=file.filename,
+            content_type=file.content_type,
+            file_bytes=content,
+            uploaded_by_id=user["id"],
+        )
+    )
+
+
 @uploads_router.post("/{upload_id}/retry", response_model=UploadJob)
 async def retry_failed(upload_id: UUID, body: RetryUploadRequest, db: AsyncSession = Depends(get_session), user=Depends(get_current_user)):
     svc = FarmersService(db)

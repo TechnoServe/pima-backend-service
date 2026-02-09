@@ -171,7 +171,6 @@ class FarmersService:
             "gender",
             "age",
             "coffee_tree_numbers",
-            "number_of_coffee_plots",
             "phone_number",
             "coop_membership_number",
             "location",
@@ -258,7 +257,7 @@ class FarmersService:
         headers = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
         header_set = {h.lower(): i for i, h in enumerate(headers)}
 
-        required = ["farmer_sf_id", "tns_id", "first_name", "last_name"]
+        required = ["farmer_sf_id", "tns_id", "first_name", "last_name", "ffg_id", "hh_number", "farmer_number"]
         errors: list[UploadValidationWarning] = []
         for key in required:
             if key not in header_set:
@@ -446,10 +445,29 @@ class FarmersService:
         from_sf: bool | None = None
         if from_sf_raw not in (None, ""):
             from_sf = str(from_sf_raw).strip().lower() in ("1", "true", "yes")
+
         tns_id = str(self._cell(row, header_idx, "tns_id") or "").strip()
+        ffg_id = str(self._cell(row, header_idx, "ffg_id") or "").strip()
+        hh_number_raw = self._cell(row, header_idx, "hh_number")
+        farmer_number_raw = self._cell(row, header_idx, "farmer_number")
 
         if not farmer_identifier:
             raise ValidationError("Missing farmer identifier")
+        if not ffg_id:
+            raise ValidationError("Missing ffg_id")
+        if hh_number_raw in (None, ""):
+            raise ValidationError("Missing hh_number")
+        if farmer_number_raw in (None, ""):
+            raise ValidationError("Missing farmer_number")
+
+        try:
+            hh_number = int(hh_number_raw)
+            farmer_number = int(farmer_number_raw)
+        except Exception as exc:
+            raise ValidationError("hh_number and farmer_number must be integers") from exc
+
+        if farmer_number not in (1, 2):
+            raise ValidationError("farmer_number must be 1 or 2")
 
         farmer_data = await self.repo.resolve_farmer_for_project(
             project_id=run.project_id,
@@ -459,15 +477,67 @@ class FarmersService:
         if not farmer_data:
             raise NotFoundError("Farmer not found for this project")
 
-        farmer_id, farmer_group_id = farmer_data
-
-        farmer_updates = self._build_farmer_updates(row=row, header_idx=header_idx, from_sf=from_sf)
+        farmer_id, _current_group_id = farmer_data
+        target_group_id = await self.repo.resolve_group_by_tns(project_id=run.project_id, ffg_id=ffg_id)
+        if not target_group_id:
+            raise ValidationError(f"Unknown ffg_id: {ffg_id}")
 
         household_identifier = self._cell(row, header_idx, "sf_household_id") or self._cell(row, header_idx, "household_id")
-        if household_identifier and "household_id" in T("farmers").c:
+        household_id = None
+        if household_identifier:
             household_id = await self.repo.resolve_household_id(identifier=str(household_identifier), from_sf=from_sf)
-            if household_id:
-                farmer_updates["household_id"] = household_id
+
+        if not household_id:
+            household_id = await self.repo.find_household_by_group_number(
+                farmer_group_id=target_group_id,
+                household_number=hh_number,
+            )
+
+        if not household_id:
+            household_values = self._build_household_values(
+                target_group_id=target_group_id,
+                run=run,
+                ffg_id=ffg_id,
+                hh_number=hh_number,
+                row=row,
+                header_idx=header_idx,
+            )
+            household_id = await self.repo.create_household(values=household_values)
+
+        member_count = await self.repo.count_household_members(household_id=household_id, exclude_farmer_id=farmer_id)
+        if member_count >= 2:
+            raise ValidationError("A household cannot have more than 2 members")
+
+        is_primary = farmer_number == 1
+        if is_primary:
+            existing_primary = await self.repo.count_primary_members(household_id=household_id, exclude_farmer_id=farmer_id)
+            if existing_primary >= 1:
+                raise ValidationError("A household cannot have more than one primary member")
+
+        farmer_updates = self._build_farmer_updates(row=row, header_idx=header_idx, from_sf=from_sf)
+        farmer_updates["farmer_group_id"] = target_group_id
+        if "household_id" in T("farmers").c:
+            farmer_updates["household_id"] = household_id
+        if "is_primary_household_member" in T("farmers").c:
+            farmer_updates["is_primary_household_member"] = is_primary
+
+        farmer_composite = self._build_farmer_composite_id(ffg_id=ffg_id, hh_number=hh_number, farmer_number=farmer_number)
+        self._set_if_present(
+            farmer_updates,
+            T("farmers"),
+            ["composite_id", "farmer_composite_id", "participant_composite_id"],
+            farmer_composite,
+        )
+
+        household_updates = self._build_household_updates(
+            target_group_id=target_group_id,
+            ffg_id=ffg_id,
+            hh_number=hh_number,
+            row=row,
+            header_idx=header_idx,
+        )
+        if household_updates:
+            await self.repo.update_household(household_id=household_id, values=household_updates)
 
         if farmer_updates:
             if "updated_at" in T("farmers").c:
@@ -491,7 +561,7 @@ class FarmersService:
                 continue
 
             session_id = await self.repo.latest_session_id_for_group_module(
-                farmer_group_id=farmer_group_id,
+                farmer_group_id=target_group_id,
                 module_id=module_id,
             )
             if not session_id:
@@ -540,7 +610,6 @@ class FarmersService:
             "gender",
             "age",
             "phone_number",
-            "number_of_coffee_plots",
             "coop_membership_number",
             "status",
             "farmer_status",
@@ -565,6 +634,96 @@ class FarmersService:
             updates["from_sf"] = from_sf
 
         return updates
+
+    def _build_household_values(
+        self,
+        *,
+        target_group_id: UUID,
+        run: UploadRun,
+        ffg_id: str,
+        hh_number: int,
+        row,
+        header_idx: dict[str, int],
+    ) -> dict:
+        household = T("households")
+        values = {}
+        if "farmer_group_id" in household.c:
+            values["farmer_group_id"] = target_group_id
+        if "project_id" in household.c:
+            values["project_id"] = run.project_id
+        if "household_number" in household.c:
+            values["household_number"] = hh_number
+
+        self._set_if_present(
+            values,
+            household,
+            ["composite_id", "household_composite_id", "composite_household_id"],
+            self._build_household_composite_id(ffg_id=ffg_id, hh_number=hh_number),
+        )
+
+        updates = self._household_shared_metrics(row=row, header_idx=header_idx)
+        values.update(updates)
+        return values
+
+    def _build_household_updates(
+        self,
+        *,
+        target_group_id: UUID,
+        ffg_id: str,
+        hh_number: int,
+        row,
+        header_idx: dict[str, int],
+    ) -> dict:
+        household = T("households")
+        values = {}
+        if "farmer_group_id" in household.c:
+            values["farmer_group_id"] = target_group_id
+        if "household_number" in household.c:
+            values["household_number"] = hh_number
+
+        self._set_if_present(
+            values,
+            household,
+            ["composite_id", "household_composite_id", "composite_household_id"],
+            self._build_household_composite_id(ffg_id=ffg_id, hh_number=hh_number),
+        )
+
+        values.update(self._household_shared_metrics(row=row, header_idx=header_idx))
+        return values
+
+    def _household_shared_metrics(self, *, row, header_idx: dict[str, int]) -> dict:
+        household = T("households")
+        values = {}
+
+        coffee_trees = self._cell(row, header_idx, "coffee_tree_numbers")
+        if coffee_trees not in (None, "") and "number_of_trees" in household.c:
+            values["number_of_trees"] = int(coffee_trees)
+
+        coffee_plots = self._cell(row, header_idx, "number_of_coffee_plots")
+        if coffee_plots not in (None, ""):
+            if "farm_size" in household.c:
+                values["farm_size"] = coffee_plots
+            elif "number_of_coffee_plots" in household.c:
+                values["number_of_coffee_plots"] = coffee_plots
+
+        if values and "updated_at" in household.c:
+            values["updated_at"] = datetime.utcnow()
+        return values
+
+    @staticmethod
+    def _build_household_composite_id(*, ffg_id: str, hh_number: int) -> str:
+        return f"{ffg_id}-{hh_number}"
+
+    @staticmethod
+    def _build_farmer_composite_id(*, ffg_id: str, hh_number: int, farmer_number: int) -> str:
+        return f"{ffg_id}-{hh_number}-{farmer_number}"
+
+    @staticmethod
+    def _set_if_present(target: dict, table_obj, candidate_columns: list[str], value):
+        for col in candidate_columns:
+            if col in table_obj.c:
+                target[col] = value
+                return
 
     @staticmethod
     def _cell(row, header_idx: dict[str, int], key: str):

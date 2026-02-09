@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional, Tuple, List, Dict
 from uuid import UUID
 
-from sqlalchemy import select, func, or_, desc, asc, update, literal, case
+from sqlalchemy import select, func, or_, desc, asc, update, insert, literal, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import alias
 
@@ -221,14 +221,11 @@ class FarmersRepository:
         phone_col = Farmer.c.phone_number if "phone_number" in Farmer.c else literal(None)
 
         # optional fields in your csv (if missing in DB -> None)
-        coffee_tree_numbers_col = (
-            Farmer.c.coffee_tree_numbers
-            if "coffee_tree_numbers" in Farmer.c
-            else (Household.c.number_of_trees if "number_of_trees" in Household.c else literal(None))
-        )
+        # Shared household values: all farmers in same household export same values.
+        coffee_tree_numbers_col = Household.c.number_of_trees if "number_of_trees" in Household.c else literal(None)
         number_of_coffee_plots_col = (
-            Farmer.c.number_of_coffee_plots
-            if "number_of_coffee_plots" in Farmer.c
+            Household.c.farm_size
+            if "farm_size" in Household.c
             else (Household.c.number_of_coffee_plots if "number_of_coffee_plots" in Household.c else literal(None))
         )
         coop_membership_col = (
@@ -276,9 +273,12 @@ class FarmersRepository:
                 coop_membership_col.label("coop_membership_number"),
                 loc_name_col.label("location"),
                 farmer_sf_col.label("farmer_sf_id"),
+                Farmer.c.id.label("farmer_id"),
+                (Farmer.c.from_sf if "from_sf" in Farmer.c else literal(None)).label("from_sf"),
                 farmer_tns_col.label("tns_id"),
                 hh_number_col.label("hh_number"),
                 hh_sf_col.label("sf_household_id"),
+                Household.c.id.label("household_id"),
                 # farmer_number: match your historical file logic (1 = primary, 2 = secondary)
                 case(
                     (is_primary_col.is_(True), literal(1)),
@@ -387,6 +387,184 @@ class FarmersRepository:
 
         return out
 
+    # ---------------- Upload processing helpers ----------------
+    async def resolve_farmer_for_project(
+        self,
+        *,
+        project_id: UUID,
+        identifier: str,
+        from_sf: bool | None,
+        active_only: bool = False,
+    ) -> tuple[UUID, UUID] | None:
+        Farmer = T("farmers")
+        FarmerGroup = T("farmer_groups")
+        def _query(match_col):
+            return (
+                select(Farmer.c.id, Farmer.c.farmer_group_id)
+                .select_from(Farmer)
+                .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
+                .where(
+                    match_col == identifier,
+                    FarmerGroup.c.project_id == project_id,
+                    Farmer.c.is_deleted.is_(False),
+                    *( [func.lower(func.coalesce(Farmer.c.status, "")).eq("active")] if active_only and "status" in Farmer.c else [] ),
+                )
+                .limit(1)
+            )
+
+        query_order = []
+        if from_sf is True and "sf_id" in Farmer.c:
+            query_order = [Farmer.c.sf_id, Farmer.c.id]
+        elif from_sf is False:
+            query_order = [Farmer.c.id] + ([Farmer.c.sf_id] if "sf_id" in Farmer.c else [])
+        else:
+            query_order = ([Farmer.c.sf_id] if "sf_id" in Farmer.c else []) + [Farmer.c.id]
+
+        for match_col in query_order:
+            row = (await self.db.execute(_query(match_col))).first()
+            if row:
+                return row[0], row[1]
+        return None
+
+    async def resolve_household_id(self, *, identifier: str, from_sf: bool | None) -> UUID | None:
+        Household = T("households")
+        order = []
+        if from_sf is True and "sf_id" in Household.c:
+            order = [Household.c.sf_id, Household.c.id]
+        elif from_sf is False:
+            order = [Household.c.id] + ([Household.c.sf_id] if "sf_id" in Household.c else [])
+        else:
+            order = ([Household.c.sf_id] if "sf_id" in Household.c else []) + [Household.c.id]
+
+        for col_match in order:
+            q = select(Household.c.id).where(col_match == identifier).limit(1)
+            val = (await self.db.execute(q)).scalar_one_or_none()
+            if val:
+                return val
+        return None
+
+    async def latest_session_id_for_group_module(self, *, farmer_group_id: UUID, module_id: UUID) -> UUID | None:
+        TrainingSession = T("training_sessions")
+
+        q = select(TrainingSession.c.id).where(TrainingSession.c.training_module_id == module_id)
+        if "farmer_group_id" in TrainingSession.c:
+            q = q.where(TrainingSession.c.farmer_group_id == farmer_group_id)
+
+        order_col = TrainingSession.c.training_date if "training_date" in TrainingSession.c else TrainingSession.c.created_at
+        q = q.order_by(order_col.desc()).limit(1)
+
+        return (await self.db.execute(q)).scalar_one_or_none()
+
+    async def attendance_id(self, *, project_id: UUID, farmer_id: UUID, session_id: UUID) -> UUID | None:
+        Attendance = T("attendances")
+
+        q = select(Attendance.c.id).where(
+            Attendance.c.farmer_id == farmer_id,
+            Attendance.c.training_session_id == session_id,
+        )
+        if "project_id" in Attendance.c:
+            q = q.where(Attendance.c.project_id == project_id)
+        return (await self.db.execute(q.limit(1))).scalar_one_or_none()
+
+    async def update_farmer(self, *, farmer_id: UUID, values: dict) -> None:
+        Farmer = T("farmers")
+        await self.db.execute(update(Farmer).where(Farmer.c.id == farmer_id).values(**values))
+
+    async def upsert_attendance(self, *, project_id: UUID, farmer_id: UUID, session_id: UUID, values: dict, attendance_id: UUID | None) -> None:
+        Attendance = T("attendances")
+        if attendance_id:
+            if values:
+                await self.db.execute(update(Attendance).where(Attendance.c.id == attendance_id).values(**values))
+            return
+
+        ins = {"farmer_id": farmer_id, "training_session_id": session_id, **values}
+        if "project_id" in Attendance.c:
+            ins["project_id"] = project_id
+        await self.db.execute(insert(Attendance).values(**ins))
+
+
+    async def resolve_group_by_tns(self, *, project_id: UUID, ffg_id: str) -> UUID | None:
+        FarmerGroup = T("farmer_groups")
+        q = (
+            select(FarmerGroup.c.id)
+            .where(FarmerGroup.c.project_id == project_id, FarmerGroup.c.tns_id == ffg_id)
+            .limit(1)
+        )
+        return (await self.db.execute(q)).scalar_one_or_none()
+
+    async def find_household_by_group_number(self, *, farmer_group_id: UUID, household_number: int) -> UUID | None:
+        Household = T("households")
+        if "household_number" not in Household.c:
+            return None
+        q = (
+            select(Household.c.id)
+            .where(Household.c.farmer_group_id == farmer_group_id, Household.c.household_number == household_number)
+            .limit(1)
+        )
+        return (await self.db.execute(q)).scalar_one_or_none()
+
+    async def create_household(self, *, values: dict) -> UUID:
+        Household = T("households")
+        stmt = insert(Household).values(**values).returning(Household.c.id)
+        return (await self.db.execute(stmt)).scalar_one()
+
+
+
+    async def is_farmer_active(self, *, farmer_id: UUID) -> bool:
+        Farmer = T("farmers")
+        if "status" not in Farmer.c:
+            return True
+        q = select(func.lower(func.coalesce(Farmer.c.status, ""))).where(Farmer.c.id == farmer_id).limit(1)
+        status_value = (await self.db.execute(q)).scalar_one_or_none()
+        return status_value == "active"
+
+    async def get_farmer_current_state(self, *, farmer_id: UUID) -> tuple[UUID | None, bool | None]:
+        Farmer = T("farmers")
+        primary_col = Farmer.c.is_primary_household_member if "is_primary_household_member" in Farmer.c else literal(None)
+        q = select(Farmer.c.household_id, primary_col).where(Farmer.c.id == farmer_id).limit(1)
+        row = (await self.db.execute(q)).first()
+        if not row:
+            return None, None
+        return row[0], row[1]
+
+
+    async def get_household_state(self, *, household_id: UUID) -> tuple[UUID | None, int | None]:
+        Household = T("households")
+        hh_num_col = Household.c.household_number if "household_number" in Household.c else literal(None)
+        q = select(Household.c.farmer_group_id, hh_num_col).where(Household.c.id == household_id).limit(1)
+        row = (await self.db.execute(q)).first()
+        if not row:
+            return None, None
+        return row[0], row[1]
+
+    async def count_household_members(self, *, household_id: UUID, exclude_farmer_id: UUID | None = None) -> int:
+        Farmer = T("farmers")
+        q = select(func.count()).where(Farmer.c.household_id == household_id, Farmer.c.is_deleted.is_(False))
+        if "status" in Farmer.c:
+            q = q.where(func.lower(func.coalesce(Farmer.c.status, "")) == "active")
+        if exclude_farmer_id:
+            q = q.where(Farmer.c.id != exclude_farmer_id)
+        return (await self.db.execute(q)).scalar_one() or 0
+
+    async def count_primary_members(self, *, household_id: UUID, exclude_farmer_id: UUID | None = None) -> int:
+        Farmer = T("farmers")
+        if "is_primary_household_member" not in Farmer.c:
+            return 0
+        q = select(func.count()).where(
+            Farmer.c.household_id == household_id,
+            Farmer.c.is_deleted.is_(False),
+            Farmer.c.is_primary_household_member.is_(True),
+        )
+        if "status" in Farmer.c:
+            q = q.where(func.lower(func.coalesce(Farmer.c.status, "")) == "active")
+        if exclude_farmer_id:
+            q = q.where(Farmer.c.id != exclude_farmer_id)
+        return (await self.db.execute(q)).scalar_one() or 0
+
+    async def update_household(self, *, household_id: UUID, values: dict) -> None:
+        Household = T("households")
+        await self.db.execute(update(Household).where(Household.c.id == household_id).values(**values))
+
     # ---------------- CommCare flagging ----------------
     async def flag_farmers_send_to_commcare(self, *, project_id: UUID) -> int:
         Farmer = T("farmers")
@@ -425,6 +603,20 @@ class FarmersRepository:
             .where(
                 UploadRun.project_id == project_id,
                 UploadRun.status.in_(["uploading", "validating", "processing"]),
+            )
+            .order_by(desc(UploadRun.uploaded_at))
+            .limit(1)
+        )
+        return (await self.db.execute(q)).scalars().first()
+
+
+    async def get_blocking_validation_parent(self, *, project_id: UUID) -> Optional[UploadRun]:
+        q = (
+            select(UploadRun)
+            .where(
+                UploadRun.project_id == project_id,
+                UploadRun.parent_upload_id.is_(None),
+                UploadRun.status == "validation_errored",
             )
             .order_by(desc(UploadRun.uploaded_at))
             .limit(1)

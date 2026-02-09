@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional, Tuple, List, Dict
-from uuid import UUID
+import uuid
 
 from sqlalchemy import select, func, or_, desc, asc, update, insert, literal, case
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -166,6 +166,22 @@ class FarmersRepository:
 
         return rows, total
 
+    async def summary(self, project_id: UUID) -> dict:
+        Farmer = T("farmers")
+        FarmerGroup = T("farmer_groups")
+
+        q = (
+            select(
+                func.count().label("total"),
+                func.sum(case((Farmer.c.send_to_commcare.is_(True), 1), else_=0)).label("pending_commcare"),
+            )
+            .select_from(Farmer)
+            .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
+            .where(FarmerGroup.c.project_id == project_id, Farmer.c.is_deleted.is_(False))
+        )
+
+        res = await self.db.execute(q)
+        return res.mappings().first() or {"total": 0, "pending_commcare": 0}
     # ---------------- Export: training modules ----------------
     async def export_training_modules(self, project_id: UUID) -> List[dict]:
         TrainingModule = T("training_modules")
@@ -220,14 +236,10 @@ class FarmersRepository:
         age_col = Farmer.c.age if "age" in Farmer.c else literal(None)
         phone_col = Farmer.c.phone_number if "phone_number" in Farmer.c else literal(None)
 
-        # optional fields in your csv (if missing in DB -> None)
-        # Shared household values: all farmers in same household export same values.
-        coffee_tree_numbers_col = Household.c.number_of_trees if "number_of_trees" in Household.c else literal(None)
-        number_of_coffee_plots_col = (
-            Household.c.farm_size
-            if "farm_size" in Household.c
-            else (Household.c.number_of_coffee_plots if "number_of_coffee_plots" in Household.c else literal(None))
-        )
+
+        coffee_tree_numbers_col = Household.c.number_of_trees
+        number_of_coffee_plots_col = Household.c.farm_size
+    
         coop_membership_col = (
             Farmer.c.coop_membership_number if "coop_membership_number" in Farmer.c else literal(None)
         )
@@ -250,11 +262,8 @@ class FarmersRepository:
         ba_id_col = col(BA, "id")
         ba_name_col = name_expr(BA).label("business_advisor")
 
-        create_in_commcare_col = (
-            Farmer.c.create_in_commcare
-            if "create_in_commcare" in Farmer.c
-            else (Farmer.c.create_in_commcare_flag if "create_in_commcare_flag" in Farmer.c else literal(None))
-        )
+        create_in_commcare_col = Farmer.c.send_to_commcare
+            
 
         is_primary_col = Farmer.c.is_primary_household_member if "is_primary_household_member" in Farmer.c else literal(None)
         updated_at_col = Farmer.c.updated_at if "updated_at" in Farmer.c else literal(None)
@@ -304,7 +313,7 @@ class FarmersRepository:
             .outerjoin(FT, fg_responsible_col == ft_id_col)
             .outerjoin(BA, col(FT, "manager_id") == ba_id_col)
             .where(FarmerGroup.c.project_id == project_id, Farmer.c.is_deleted.is_(False))
-            .order_by(desc(updated_at_col))
+            .order_by(asc(farmer_tns_col))
         )
 
         return (await self.db.execute(q)).mappings().all()
@@ -444,7 +453,7 @@ class FarmersRepository:
     async def latest_session_id_for_group_module(self, *, farmer_group_id: UUID, module_id: UUID) -> UUID | None:
         TrainingSession = T("training_sessions")
 
-        q = select(TrainingSession.c.id).where(TrainingSession.c.training_module_id == module_id)
+        q = select(TrainingSession.c.id).where(TrainingSession.c.module_id == module_id)
         if "farmer_group_id" in TrainingSession.c:
             q = q.where(TrainingSession.c.farmer_group_id == farmer_group_id)
 
@@ -468,14 +477,22 @@ class FarmersRepository:
         Farmer = T("farmers")
         await self.db.execute(update(Farmer).where(Farmer.c.id == farmer_id).values(**values))
 
-    async def upsert_attendance(self, *, project_id: UUID, farmer_id: UUID, session_id: UUID, values: dict, attendance_id: UUID | None) -> None:
+    async def upsert_attendance(self, *, project_id: UUID, farmer_id: UUID, session_id: UUID, values: dict, attendance_id: UUID | None, updated_by) -> None:
         Attendance = T("attendances")
         if attendance_id:
             if values:
                 await self.db.execute(update(Attendance).where(Attendance.c.id == attendance_id).values(**values))
             return
 
-        ins = {"farmer_id": farmer_id, "training_session_id": session_id, **values}
+        ins = {
+            "farmer_id":farmer_id, 
+            "training_session_id": session_id, 
+            **values, "id": uuid.uuid4(), 
+            "created_by_id": updated_by, 
+            "last_updated_by_id": updated_by,
+            "created_at": func.now(),
+            "updated_at": func.now(),
+        }
         if "project_id" in Attendance.c:
             ins["project_id"] = project_id
         await self.db.execute(insert(Attendance).values(**ins))

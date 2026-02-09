@@ -294,11 +294,39 @@ class FarmersService:
         file_bytes: bytes,
         uploaded_by_id: UUID | None,
     ) -> UploadJob:
-        """Persist upload metadata and file, then queue processing."""
+        """Create root upload run and validate it before allowing processing."""
         active = await self.repo.get_active_upload(project_id=project_id)
-        # if active:
-        #     raise ConflictError("An upload is already in progress for this project.")
+        if active:
+            raise ConflictError("Cannot upload: another run is currently processing.")
 
+        blocking_parent = await self.repo.get_blocking_validation_parent(project_id=project_id)
+        if blocking_parent:
+            raise ConflictError(
+                "Cannot upload new file while a parent run has validation errors. Reupload against that run.",
+                details={"blocking_upload_id": str(blocking_parent.id)},
+            )
+
+        run = await self._create_upload_run(
+            project_id=project_id,
+            file_name=file_name,
+            content_type=content_type,
+            file_bytes=file_bytes,
+            uploaded_by_id=uploaded_by_id,
+            parent_upload_id=None,
+        )
+        await self._validate_or_queue_run(run=run, file_bytes=file_bytes)
+        return await self.get_upload_job(run.id)
+
+    async def _create_upload_run(
+        self,
+        *,
+        project_id: UUID,
+        file_name: str,
+        content_type: str | None,
+        file_bytes: bytes,
+        uploaded_by_id: UUID | None,
+        parent_upload_id: UUID | None,
+    ) -> UploadRun:
         try:
             print("Uploading file to storage...")
             gcs = upload_bytes(
@@ -320,24 +348,181 @@ class FarmersService:
             gcs_bucket=gcs["bucket"],
             gcs_object_name=gcs["object_name"],
             gcs_uri=gcs["gcs_uri"],
-            status="uploading",
-            progress=0,
+            status="validating",
+            progress=5,
             total_rows=0,
             success_count=0,
             failed_count=0,
             remaining_count=0,
             uploaded_by_id=uploaded_by_id,
+            parent_upload_id=parent_upload_id,
             uploaded_at=datetime.utcnow(),
         )
-        print("Creating upload run in database...")
-        run = await self.repo.create_upload_run(run)
-        print(f"Upload run created with ID {run.id}, queuing processing...")
-        return await self.get_upload_job(run.id)
+        return await self.repo.create_upload_run(run)
+
+    async def _validate_or_queue_run(self, *, run: UploadRun, file_bytes: bytes) -> None:
+        errors = await self._collect_validation_errors(run=run, file_bytes=file_bytes)
+        if errors:
+            await self._mark_validation_errored(run=run, errors=errors)
+            return
+
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        ws = wb.active
+        run.status = "processing"
+        run.progress = 10
+        run.total_rows = max((ws.max_row - 1 if ws.max_row else 0), 0)
+        run.failed_count = 0
+        run.remaining_count = run.total_rows
+        run.meta = {**(run.meta or {}), "validated": True}
+        await self.db.commit()
+
+    async def _collect_validation_errors(self, *, run: UploadRun, file_bytes: bytes) -> list[dict]:
+        issues: list[dict] = []
+
+        base_validation = self.validate_upload(file_bytes=file_bytes)
+        for err in base_validation.errors:
+            issues.append({"row_number": 1, "field": err.column or "header", "error_type": err.type, "message": err.message})
+
+        if issues:
+            return issues
+
+        wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+        ws = wb.active
+        headers = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        header_idx = {h.strip().lower(): i for i, h in enumerate(headers)}
+
+        for row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+            row_issues = await self._validate_row_constraints(
+                run=run,
+                row_number=row_number,
+                row=row,
+                header_idx=header_idx,
+            )
+            issues.extend(row_issues)
+
+        return issues
+
+    async def _validate_row_constraints(self, *, run: UploadRun, row_number: int, row, header_idx: dict[str, int]) -> list[dict]:
+        issues: list[dict] = []
+
+        def add(field: str, message: str, error_type: str = "validation_error"):
+            issues.append({"row_number": row_number, "field": field, "error_type": error_type, "message": message})
+
+        farmer_identifier = str(self._cell(row, header_idx, "farmer_sf_id") or "").strip()
+        from_sf_raw = self._cell(row, header_idx, "from_sf")
+        from_sf = None if from_sf_raw in (None, "") else str(from_sf_raw).strip().lower() in ("1", "true", "yes")
+        ffg_id = str(self._cell(row, header_idx, "ffg_id") or "").strip()
+        hh_number_raw = self._cell(row, header_idx, "hh_number")
+        farmer_number_raw = self._cell(row, header_idx, "farmer_number")
+        household_identifier = self._cell(row, header_idx, "sf_household_id") or self._cell(row, header_idx, "household_id")
+
+        if not farmer_identifier:
+            add("farmer_sf_id", "Missing farmer identifier")
+            return issues
+
+        farmer_data = await self.repo.resolve_farmer_for_project(project_id=run.project_id, identifier=farmer_identifier, from_sf=from_sf)
+        if not farmer_data:
+            add("farmer_sf_id", "Farmer not found for this project")
+            return issues
+        farmer_id, _ = farmer_data
+
+        if not ffg_id:
+            add("ffg_id", "Missing ffg_id")
+            return issues
+
+        target_group_id = await self.repo.resolve_group_by_tns(project_id=run.project_id, ffg_id=ffg_id)
+        if not target_group_id:
+            add("ffg_id", f"Unknown ffg_id: {ffg_id}")
+            return issues
+
+        try:
+            hh_number = int(hh_number_raw)
+        except Exception:
+            add("hh_number", "hh_number must be an integer")
+            return issues
+
+        try:
+            farmer_number = int(farmer_number_raw)
+        except Exception:
+            add("farmer_number", "farmer_number must be an integer")
+            return issues
+
+        if farmer_number not in (1, 2):
+            add("farmer_number", "farmer_number must be 1 or 2")
+
+        household_id = None
+        if household_identifier:
+            household_id = await self.repo.resolve_household_id(identifier=str(household_identifier), from_sf=from_sf)
+            if not household_id:
+                add("sf_household_id", "Provided household identifier was not found")
+
+        if not household_id:
+            household_id = await self.repo.find_household_by_group_number(farmer_group_id=target_group_id, household_number=hh_number)
+
+        if household_id:
+            members = await self.repo.count_household_members(household_id=household_id, exclude_farmer_id=farmer_id)
+            if members >= 2:
+                add("hh_number", "A household cannot have more than 2 members")
+
+            if farmer_number == 1:
+                existing_primary = await self.repo.count_primary_members(household_id=household_id, exclude_farmer_id=farmer_id)
+                if existing_primary >= 1:
+                    add("farmer_number", "A household cannot have more than one primary member")
+
+        return issues
+
+    async def _mark_validation_errored(self, *, run: UploadRun, errors: list[dict]) -> None:
+        report_bytes = self._build_validation_error_report(errors)
+        try:
+            uploaded = upload_bytes(
+                project_id=str(run.project_id),
+                category="farmer-upload-validation-errors",
+                filename=f"{run.id}-validation-errors.xlsx",
+                content=report_bytes,
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            run.error_gcs_object_name = uploaded["object_name"]
+            run.error_gcs_uri = uploaded["gcs_uri"]
+        except Exception:
+            # keep status change even if report upload fails
+            pass
+
+        run.status = "validation_errored"
+        run.progress = 100
+        run.total_rows = max(run.total_rows, len(errors))
+        run.failed_count = len(errors)
+        run.remaining_count = 0
+        run.completed_at = datetime.utcnow()
+        run.meta = {**(run.meta or {}), "validation_errors_count": len(errors)}
+
+        self.db.add_all(
+            [
+                UploadRowError(
+                    upload_run_id=run.id,
+                    row_number=e["row_number"],
+                    error_type=e.get("error_type", "validation_error"),
+                    error_message=f"{e.get('field', 'row')}: {e.get('message', 'Validation error')}",
+                )
+                for e in errors
+            ]
+        )
+        await self.db.commit()
+
+    def _build_validation_error_report(self, errors: list[dict]) -> bytes:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Validation Errors"
+        ws.append(["row_number", "field", "error_type", "message"])
+        for e in errors:
+            ws.append([e.get("row_number"), e.get("field"), e.get("error_type", "validation_error"), e.get("message")])
+        bio = io.BytesIO()
+        wb.save(bio)
+        return bio.getvalue()
 
     async def process_upload_run(self, *, upload_run_id: UUID, file_bytes: bytes | None = None) -> None:
         """Background processor for queued upload runs."""
         run = await self.repo.get_upload_run(upload_run_id)
-        if not run or run.status in {"completed", "failed", "cancelled"}:
+        if not run or run.status in {"completed", "failed", "cancelled", "validation_errored"}:
             return
 
         # try:
@@ -784,6 +969,37 @@ class FarmersService:
         jobs = [await self.get_upload_job(x.id) for x in items]
         total_pages = (total + page_size - 1) // page_size
         return UploadHistoryResponse(items=jobs, total=total, page=page, page_size=page_size, total_pages=total_pages)
+
+    async def reupload_to_run(
+        self,
+        *,
+        upload_id: UUID,
+        file_name: str,
+        content_type: str | None,
+        file_bytes: bytes,
+        uploaded_by_id: UUID | None,
+    ) -> UploadJob:
+        parent = await self.repo.get_upload_run(upload_id)
+        if not parent:
+            raise NotFoundError("Upload not found")
+
+        if parent.status != "validation_errored":
+            raise ConflictError("Reupload is only allowed for validation-errored runs")
+
+        active = await self.repo.get_active_upload(project_id=parent.project_id)
+        if active:
+            raise ConflictError("Cannot reupload while another run is processing")
+
+        child = await self._create_upload_run(
+            project_id=parent.project_id,
+            file_name=file_name,
+            content_type=content_type,
+            file_bytes=file_bytes,
+            uploaded_by_id=uploaded_by_id,
+            parent_upload_id=parent.id,
+        )
+        await self._validate_or_queue_run(run=child, file_bytes=file_bytes)
+        return await self.get_upload_job(child.id)
 
     async def retry_upload(self, *, upload_id: UUID, mode: str) -> UploadJob:
         run = await self.repo.get_upload_run(upload_id)

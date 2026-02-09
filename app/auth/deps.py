@@ -61,3 +61,25 @@ async def require_write_access(
     from app.auth.rbac import ensure_can_write
     ensure_can_write(current_user.get("user_role"))
     return current_user
+
+async def require_project_access(
+    session: AsyncSession = Depends(get_session),
+    current_user=Depends(get_current_user),
+    project_id: str | None = None,
+):
+    from app.auth.rbac import ensure_project_access
+    if project_id is None:
+        return current_user
+    psr = get_table("project_staff_roles")
+    stmt = select(psr).where(
+        psr.c.project_id == project_id,
+        psr.c.staff_id == current_user["id"],
+    )
+    res = await session.execute(stmt)
+    row = res.first()
+    if not row:
+        raise Unauthorized("No access to this project")
+    print("Project access role:", current_user)
+    print("Project access status:", row)
+    # ensure_project_access(current_user.get("user_role"), row[0].status)
+    return current_user

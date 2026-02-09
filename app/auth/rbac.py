@@ -34,3 +34,9 @@ def can_write(role: str | None) -> bool:
 def ensure_can_write(role: str | None) -> None:
     if not can_write(role):
         raise Forbidden("You do not have permission to perform this action")
+
+def ensure_project_access(user_role: str | None, user_project_roles: Set[str]) -> None:
+    if is_admin(user_role):
+        return  # Admins have access to all projects
+    if not user_project_roles:
+        raise Forbidden("You do not have access to this project")

@@ -15,5 +15,7 @@ class Settings(BaseSettings):
     access_token_exp_minutes: int = 60 * 12  # 12h
 
     cors_origins: str = "*"  # comma-separated list or '*'
+    gcp_project_id: str
+    gcs_bucket_name: str
 
 settings = Settings()

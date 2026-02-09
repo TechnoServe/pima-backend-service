@@ -36,8 +36,13 @@ TABLES = [
 ]
 
 def create_app() -> FastAPI:
+    print("Setting up logging...")
     setup_logging()
+    print("Logging is set up.")
+    
+    print("Creating FastAPI app...")
     app = FastAPI(title=settings.app_name)
+    print("FastAPI app created.")
 
     # CORS
     if settings.cors_origins == "*":
@@ -54,7 +59,9 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _startup():
+        print("Reflecting database tables...")
         await reflect_tables(engine, TABLES, schema=settings.db_schema)
+        print("Database tables reflected successfully.")
 
     @app.get("/health")
     async def health():

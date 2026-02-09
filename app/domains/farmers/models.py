@@ -30,6 +30,7 @@ UploadStatusEnum = Enum(
     "uploading",
     "validating",
     "processing",
+    "validation_errored",
     "completed",
     "failed",
     "cancelled",

@@ -1,18 +1,26 @@
 from __future__ import annotations
 
 import io
+from collections import defaultdict
 from datetime import datetime
 from typing import Optional, Dict, List
 from uuid import UUID
 
 from openpyxl import load_workbook, Workbook
-from sqlalchemy import select, update, insert
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.gcs import upload_bytes, signed_get_url
+from app.db.gcs import upload_bytes, signed_get_url, download_bytes
+from app.core.config import settings
 from app.db.reflection import get_table
 from app.domains.farmers.repository import FarmersRepository
 from app.domains.farmers.models import UploadRun, UploadRowError
+from app.shared.api_errors import (
+    ConflictError,
+    ExternalServiceError,
+    NotFoundError,
+    ValidationError,
+)
 from app.domains.farmers.schemas import (
     PaginatedFarmersResponse,
     FarmerListItem,
@@ -165,11 +173,11 @@ class FarmersService:
             "gender",
             "age",
             "coffee_tree_numbers",
-            "number_of_coffee_plots",
             "phone_number",
             "coop_membership_number",
             "location",
             "farmer_sf_id",
+            "from_sf",
             "tns_id",
             "hh_number",
             "sf_household_id",
@@ -216,10 +224,11 @@ class FarmersService:
                 r.get("phone_number") if r.get("phone_number") is not None else "",
                 r.get("coop_membership_number") if r.get("coop_membership_number") is not None else "",
                 r.get("location") or "",
-                r.get("farmer_sf_id") or "",
+                str(r.get("farmer_sf_id") or r.get("farmer_id") or "") if bool(r.get("from_sf")) else str(r.get("farmer_id") or r.get("farmer_sf_id") or ""),
+                bool(r.get("from_sf")),
                 r.get("tns_id") or "",
                 r.get("hh_number") if r.get("hh_number") is not None else "",
-                r.get("sf_household_id") or "",
+                str(r.get("sf_household_id") or r.get("household_id") or "") if bool(r.get("from_sf")) else str(r.get("household_id") or r.get("sf_household_id") or ""),
                 r.get("farmer_number") if r.get("farmer_number") is not None else "",
                 r.get("ffg_id") or "",
                 r.get("training_group") or "",
@@ -241,35 +250,32 @@ class FarmersService:
         wb.save(bio)
         return bio.getvalue()
 
-    # ---------------- Upload validate + run (refactored to accept same exported XLSX) ----------------
+    # ---------------- Upload validate + run ----------------
     def validate_upload(self, *, file_bytes: bytes) -> UploadValidationResult:
+        """Validate uploaded workbook structure before queueing/processing."""
         wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
         ws = wb.active
 
         headers = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
         header_set = {h.lower(): i for i, h in enumerate(headers)}
 
-        # REQUIRED columns to match exported file
-        required = ["farmer_sf_id", "tns_id", "first_name", "last_name"]
+        required = ["farmer_sf_id", "tns_id", "first_name", "last_name", "ffg_id", "hh_number", "farmer_number"]
         errors: list[UploadValidationWarning] = []
-        for k in required:
-            if k not in header_set:
+        for key in required:
+            if key not in header_set:
                 errors.append(
                     UploadValidationWarning(
                         type="missing_column",
-                        message=f'Required column "{k}" is missing',
-                        column=k,
+                        message=f'Required column "{key}" is missing',
+                        column=key,
                         severity="error",
                     )
                 )
 
         total_rows = ws.max_row - 1 if ws.max_row else 0
-
         preview = []
         for row in ws.iter_rows(min_row=2, max_row=min(11, ws.max_row), values_only=True):
-            obj = {}
-            for i, h in enumerate(headers):
-                obj[h] = row[i] if i < len(row) else None
+            obj = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
             preview.append(obj)
 
         return UploadValidationResult(
@@ -289,296 +295,707 @@ class FarmersService:
         file_bytes: bytes,
         uploaded_by_id: UUID | None,
     ) -> UploadJob:
+        """Create root upload run and validate it before allowing processing."""
         active = await self.repo.get_active_upload(project_id=project_id)
         if active:
-            raise ValueError("An upload is already in progress for this project.")
-        
-        print(f"Uploading file to GCS for project {project_id} with filename {file_name}")  # debug
+            raise ConflictError("Cannot upload: another run is currently processing.")
 
-        # gcs = upload_bytes(
-        #     project_id=str(project_id),
-        #     category="farmer-uploads",
-        #     filename=file_name,
-        #     content=file_bytes,
-        #     content_type=content_type,
-        # )
-        
-        print("---------------------------------------------------------------------------------")
-        
-        # print(f"File uploaded to GCS: bucket={gcs['bucket']} object={gcs['object_name']}")  # debug
+        blocking_parent = await self.repo.get_blocking_validation_parent(project_id=project_id)
+        if blocking_parent:
+            raise ConflictError(
+                "Cannot upload new file while a parent run has validation errors. Reupload against that run.",
+                details={"blocking_upload_id": str(blocking_parent.id)},
+            )
+
+        run = await self._create_upload_run(
+            project_id=project_id,
+            file_name=file_name,
+            content_type=content_type,
+            file_bytes=file_bytes,
+            uploaded_by_id=uploaded_by_id,
+            parent_upload_id=None,
+        )
+        await self._validate_or_queue_run(run=run, file_bytes=file_bytes)
+        return await self.get_upload_job(run.id)
+
+    async def _create_upload_run(
+        self,
+        *,
+        project_id: UUID,
+        file_name: str,
+        content_type: str | None,
+        file_bytes: bytes,
+        uploaded_by_id: UUID | None,
+        parent_upload_id: UUID | None,
+    ) -> UploadRun:
+        try:
+            gcs = upload_bytes(
+                project_id=str(project_id),
+                category="farmer-uploads",
+                filename=f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{file_name}",
+                content=file_bytes,
+                content_type=content_type,
+            )
+        except Exception as exc:
+            raise ExternalServiceError("Failed to upload file to storage", details={"reason": str(exc)}) from exc
 
         run = UploadRun(
             project_id=project_id,
             filename=file_name,
             content_type=content_type,
             file_size_bytes=len(file_bytes),
-            #gcs_bucket=gcs["bucket"],
-            #gcs_object_name=gcs["object_name"],
-            # gcs_uri=gcs["gcs_uri"],
-            status="processing",
-            progress=0,
+            gcs_bucket=gcs["bucket"],
+            gcs_object_name=gcs["object_name"],
+            gcs_uri=gcs["gcs_uri"],
+            status="validating",
+            progress=5,
             total_rows=0,
             success_count=0,
             failed_count=0,
             remaining_count=0,
             uploaded_by_id=uploaded_by_id,
+            parent_upload_id=parent_upload_id,
             uploaded_at=datetime.utcnow(),
         )
-        run = await self.repo.create_upload_run(run)
+        return await self.repo.create_upload_run(run)
 
-        await self._process_upload_run(upload_run_id=run.id, project_id=project_id, file_bytes=file_bytes)
-        return await self.get_upload_job(run.id)
+    async def _validate_or_queue_run(self, *, run: UploadRun, file_bytes: bytes) -> None:
+        errors = await self._collect_validation_errors(run=run, file_bytes=file_bytes)
+        if errors:
+            await self._mark_validation_errored(run=run, errors=errors)
+            return
 
-    async def _process_upload_run(self, *, upload_run_id: UUID, project_id: UUID, file_bytes: bytes):
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        ws = wb.active
+        run.status = "processing"
+        run.progress = 10
+        run.total_rows = max((ws.max_row - 1 if ws.max_row else 0), 0)
+        run.failed_count = 0
+        run.remaining_count = run.total_rows
+        run.meta = {**(run.meta or {}), "validated": True}
+        await self.db.commit()
+
+    async def _collect_validation_errors(self, *, run: UploadRun, file_bytes: bytes) -> list[dict]:
+        issues: list[dict] = []
+
+        base_validation = self.validate_upload(file_bytes=file_bytes)
+        for err in base_validation.errors:
+            issues.append({"row_number": 1, "field": err.column or "header", "error_type": err.type, "message": err.message})
+
+        if issues:
+            return issues
+
+        wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+        ws = wb.active
+        headers = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        header_idx = {h.strip().lower(): i for i, h in enumerate(headers)}
+
+        validation_ctx = {
+            "prepared_farmers": set(),
+            "assigned_farmers": set(),
+            "member_delta": defaultdict(int),
+            "primary_delta": defaultdict(int),
+        }
+
+        rows = list(ws.iter_rows(min_row=2, values_only=True))
+
+        # Pre-adjust context for all farmers in the file first, so validation is not row-order dependent.
+        await self._prepare_validation_ctx(run=run, rows=rows, header_idx=header_idx, validation_ctx=validation_ctx)
+
+        for row_number, row in enumerate(rows, start=2):
+            row_issues = await self._validate_row_constraints(
+                run=run,
+                row_number=row_number,
+                row=row,
+                header_idx=header_idx,
+                validation_ctx=validation_ctx,
+            )
+            issues.extend(row_issues)
+
+        return issues
+
+    async def _prepare_validation_ctx(self, *, run: UploadRun, rows: list, header_idx: dict[str, int], validation_ctx: dict) -> None:
+        for row in rows:
+            farmer_identifier = str(self._cell(row, header_idx, "farmer_sf_id") or "").strip()
+            if not farmer_identifier:
+                continue
+            from_sf_raw = self._cell(row, header_idx, "from_sf")
+            from_sf = None if from_sf_raw in (None, "") else str(from_sf_raw).strip().lower() in ("1", "true", "yes")
+
+            farmer_data = await self.repo.resolve_farmer_for_project(
+                project_id=run.project_id,
+                identifier=farmer_identifier,
+                from_sf=from_sf,
+            )
+            if not farmer_data:
+                continue
+
+            farmer_id, _ = farmer_data
+            if farmer_id in validation_ctx["prepared_farmers"]:
+                continue
+
+            validation_ctx["prepared_farmers"].add(farmer_id)
+            current_household_id, current_is_primary = await self.repo.get_farmer_current_state(farmer_id=farmer_id)
+            if current_household_id:
+                validation_ctx["member_delta"][current_household_id] -= 1
+                if current_is_primary:
+                    validation_ctx["primary_delta"][current_household_id] -= 1
+
+    async def _validate_row_constraints(self, *, run: UploadRun, row_number: int, row, header_idx: dict[str, int], validation_ctx: dict) -> list[dict]:
+        issues: list[dict] = []
+
+        def add(field: str, message: str, error_type: str = "validation_error"):
+            issues.append({"row_number": row_number, "field": field, "error_type": error_type, "message": message})
+
+        farmer_identifier = str(self._cell(row, header_idx, "farmer_sf_id") or "").strip()
+        from_sf_raw = self._cell(row, header_idx, "from_sf")
+        from_sf = None if from_sf_raw in (None, "") else str(from_sf_raw).strip().lower() in ("1", "true", "yes")
+        ffg_id = str(self._cell(row, header_idx, "ffg_id") or "").strip()
+        hh_number_raw = self._cell(row, header_idx, "hh_number")
+        farmer_number_raw = self._cell(row, header_idx, "farmer_number")
+        household_identifier = self._cell(row, header_idx, "sf_household_id") or self._cell(row, header_idx, "household_id")
+
+        if not farmer_identifier:
+            add("farmer_sf_id", "Missing farmer identifier")
+            return issues
+
+        farmer_data = await self.repo.resolve_farmer_for_project(project_id=run.project_id, identifier=farmer_identifier, from_sf=from_sf)
+        if not farmer_data:
+            add("farmer_sf_id", "Farmer not found for this project")
+            return issues
+        farmer_id, _ = farmer_data
+
+        if farmer_id in validation_ctx["assigned_farmers"]:
+            add("farmer_sf_id", "Farmer appears multiple times in the same upload")
+            return issues
+
+        if not ffg_id:
+            add("ffg_id", "Missing ffg_id")
+            return issues
+
+        target_group_id = await self.repo.resolve_group_by_tns(project_id=run.project_id, ffg_id=ffg_id)
+        if not target_group_id:
+            add("ffg_id", f"Unknown ffg_id: {ffg_id}")
+            return issues
+
+        try:
+            hh_number = int(hh_number_raw)
+        except Exception:
+            add("hh_number", "hh_number must be an integer")
+            return issues
+
+        try:
+            farmer_number = int(farmer_number_raw)
+        except Exception:
+            add("farmer_number", "farmer_number must be an integer")
+            return issues
+
+        if farmer_number not in (1, 2):
+            add("farmer_number", "farmer_number must be 1 or 2")
+            return issues
+
+        household_id = None
+        if household_identifier:
+            household_id = await self.repo.resolve_household_id(identifier=str(household_identifier), from_sf=from_sf)
+            if not household_id:
+                add("sf_household_id", "Provided household identifier was not found")
+
+        if not household_id:
+            household_id = await self.repo.find_household_by_group_number(farmer_group_id=target_group_id, household_number=hh_number)
+
+        household_key = household_id or f"new:{target_group_id}:{hh_number}"
+
+        base_members = 0
+        base_primary = 0
+        if household_id:
+            base_members = await self.repo.count_household_members(household_id=household_id, exclude_farmer_id=farmer_id)
+            base_primary = await self.repo.count_primary_members(household_id=household_id, exclude_farmer_id=farmer_id)
+
+        projected_members = base_members + validation_ctx["member_delta"][household_key] + 1
+        if projected_members > 2:
+            add("hh_number", "A household cannot have more than 2 members")
+
+        if farmer_number == 1:
+            projected_primary = base_primary + validation_ctx["primary_delta"][household_key] + 1
+            if projected_primary > 1:
+                add("farmer_number", "A household cannot have more than one primary member")
+
+        if issues:
+            return issues
+
+        validation_ctx["assigned_farmers"].add(farmer_id)
+        validation_ctx["member_delta"][household_key] += 1
+        if farmer_number == 1:
+            validation_ctx["primary_delta"][household_key] += 1
+
+        return issues
+
+    async def _mark_validation_errored(self, *, run: UploadRun, errors: list[dict]) -> None:
+        report_bytes = self._build_validation_error_report(errors)
+        try:
+            uploaded = upload_bytes(
+                project_id=str(run.project_id),
+                category="farmer-upload-validation-errors",
+                filename=f"{run.id}-validation-errors.xlsx",
+                content=report_bytes,
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            run.error_gcs_object_name = uploaded["object_name"]
+            run.error_gcs_uri = uploaded["gcs_uri"]
+        except Exception:
+            # keep status change even if report upload fails
+            pass
+
+        run.status = "validation_errored"
+        run.progress = 100
+        run.total_rows = max(run.total_rows, len(errors))
+        run.failed_count = len(errors)
+        run.remaining_count = 0
+        run.completed_at = datetime.utcnow()
+        run.meta = {**(run.meta or {}), "validation_errors_count": len(errors)}
+
+        self.db.add_all(
+            [
+                UploadRowError(
+                    upload_run_id=run.id,
+                    row_number=e["row_number"],
+                    error_type=e.get("error_type", "validation_error"),
+                    error_message=f"{e.get('field', 'row')}: {e.get('message', 'Validation error')}",
+                )
+                for e in errors
+            ]
+        )
+        await self.db.commit()
+
+    def _build_validation_error_report(self, errors: list[dict]) -> bytes:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Validation Errors"
+        ws.append(["row_number", "field", "error_type", "message"])
+        for e in errors:
+            ws.append([e.get("row_number"), e.get("field"), e.get("error_type", "validation_error"), e.get("message")])
+        bio = io.BytesIO()
+        wb.save(bio)
+        return bio.getvalue()
+
+    async def process_upload_run(self, *, upload_run_id: UUID, file_bytes: bytes | None = None) -> None:
+        """Background processor for queued upload runs."""
         run = await self.repo.get_upload_run(upload_run_id)
-        if not run:
-            return
-
-        Farmer = T("farmers")
-        FarmerGroup = T("farmer_groups")
-        Attendance = T("attendances")
-        TrainingModule = T("training_modules")
-        TrainingSession = T("training_sessions")
-
-        # columns
-        farmer_sf_col = Farmer.c.sf_id if "sf_id" in Farmer.c else None
-        if farmer_sf_col is None:
-            run.status = "failed"
-            run.completed_at = datetime.utcnow()
-            await self.db.commit()
-            return
-
-        att_farmer_id_col = Attendance.c.farmer_id if "farmer_id" in Attendance.c else None
-        att_session_id_col = Attendance.c.training_session_id if "training_session_id" in Attendance.c else None
-        if att_farmer_id_col is None or att_session_id_col is None:
-            run.status = "failed"
-            run.completed_at = datetime.utcnow()
-            await self.db.commit()
+        if not run or run.status in {"completed", "failed", "cancelled", "validation_errored"}:
             return
 
         try:
-            run.status = "processing"
+            run.status = "validating"
+            run.progress = 5
             await self.db.commit()
+
+            if file_bytes is None:
+                if not run.gcs_object_name:
+                    raise ValidationError("Uploaded file location is missing")
+                file_bytes = download_bytes(run.gcs_object_name)
+
+            validation = self.validate_upload(file_bytes=file_bytes)
+            if not validation.is_valid:
+                await self._fail_run(run, message="Uploaded file failed validation", failed_rows=validation.total_rows)
+                return
 
             wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
             ws = wb.active
-
             headers = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
             header_idx = {h.strip().lower(): i for i, h in enumerate(headers)}
 
-            def cell(row, key: str):
-                i = header_idx.get(key)
-                return row[i] if i is not None and i < len(row) else None
-
-            # module columns by header "...-...-<id>"
             module_cols: list[tuple[int, str]] = []
-            for i, h in enumerate(headers):
-                parts = (h or "").strip().split("-")
+            for i, header in enumerate(headers):
+                parts = (header or "").strip().split("-")
                 if len(parts) >= 3:
                     module_cols.append((i, parts[-1].strip()))
 
-            total_rows = ws.max_row - 1 if ws.max_row else 0
-            run.total_rows = max(total_rows, 0)
+            modules = await self.repo.export_training_modules(run.project_id)
+            module_uuid_by_key: Dict[str, UUID] = {str(m.get("sf_id") or m["id"]): m["id"] for m in modules}
+
+            run.total_rows = max((ws.max_row - 1 if ws.max_row else 0), 0)
             run.remaining_count = run.total_rows
+            run.status = "processing"
             run.progress = 10
             await self.db.commit()
 
             row_errors: list[UploadRowError] = []
-            success = 0
-            failed = 0
-
-            # prefetch module key->module_uuid
-            modules = await self.repo.export_training_modules(project_id)
-            module_uuid_by_key: Dict[str, UUID] = {}
-            for m in modules:
-                mid = m["id"]
-                key = str(m.get("sf_id") or mid)
-                module_uuid_by_key[key] = mid
+            success_count = 0
+            failed_count = 0
 
             for row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-                print(f"Processing row {row_number}...")  # debug
-                farmer_id_uuid: Optional[UUID] = None
-                # try:
-                farmer_sf_id = str(cell(row, "farmer_sf_id") or "").strip()
-                if not farmer_sf_id:
-                    raise ValueError("Missing farmer_sf_id")
-
-                # resolve farmer local uuid & group
-                q_farmer = (
-                    select(Farmer.c.id, Farmer.c.farmer_group_id)
-                    .select_from(Farmer)
-                    .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
-                    .where(
-                        Farmer.c.sf_id == farmer_sf_id,
-                        FarmerGroup.c.project_id == project_id,
-                        Farmer.c.is_deleted.is_(False),
+                try:
+                    await self._process_single_row(
+                        run=run,
+                        row_number=row_number,
+                        row=row,
+                        headers=headers,
+                        header_idx=header_idx,
+                        module_cols=module_cols,
+                        module_uuid_by_key=module_uuid_by_key,
+                        row_errors=row_errors,
                     )
-                    .limit(1)
-                )
-                fr = (await self.db.execute(q_farmer)).first()
-                if not fr:
-                    raise ValueError("Farmer not found for this project")
-                farmer_id_uuid = fr[0]
-                farmer_group_id = fr[1]
-
-                # farmer updates (only the columns that exist)
-                farmer_updates = {}
-                for colname in [
-                    "tns_id",
-                    "first_name",
-                    "middle_name",
-                    "last_name",
-                    "gender",
-                    "age",
-                    "phone_number",
-                    "number_of_coffee_plots",
-                    "coop_membership_number",
-                    "status",
-                    "farmer_status",
-                    "create_in_commcare",
-                ]:
-                    if colname not in Farmer.c:
-                        continue
-                    v = cell(row, colname)
-                    if v is None or v == "":
-                        continue
-                    if colname == "age":
-                        try:
-                            v = int(v)
-                        except Exception:
-                            continue
-                    if colname in ("create_in_commcare",):
-                        v = str(v).strip().lower() in ("1", "true", "yes")
-                    farmer_updates[colname] = v
-
-                # always mark send_to_commcare on any update
-                if farmer_updates:
-                    if "updated_at" in Farmer.c:
-                        farmer_updates["updated_at"] = datetime.utcnow()
-                    if "send_to_commcare" in Farmer.c:
-                        farmer_updates["send_to_commcare"] = True
-                    if "send_to_commcare_status" in Farmer.c:
-                        farmer_updates["send_to_commcare_status"] = "Pending"
-
-                    await self.db.execute(update(Farmer).where(Farmer.c.id == farmer_id_uuid).values(**farmer_updates))
-
-                # Attendance updates:
-                # file gives module key -> we pick latest training_session for (farmer_group_id, module_id)
-                for idx, module_key in module_cols:
-                    if idx >= len(row):
-                        continue
-                    v = row[idx]
-                    if v is None or v == "":
-                        continue
-
-                    attended = str(v).strip().lower() in ("1", "true", "yes")
-
-                    module_uuid = module_uuid_by_key.get(module_key)
-                    if not module_uuid:
-                        # unknown module in header -> ignore (or error)
-                        continue
-
-                    # find latest session for this group+module
-                    q_sess = (
-                        select(TrainingSession.c.id)
-                        .where(
-                            TrainingSession.c.training_module_id == module_uuid,
-                            TrainingSession.c.farmer_group_id == farmer_group_id if "farmer_group_id" in TrainingSession.c else True,
+                    success_count += 1
+                except Exception as exc:
+                    failed_count += 1
+                    row_errors.append(
+                        UploadRowError(
+                            upload_run_id=run.id,
+                            row_number=row_number,
+                            farmer_id=None,
+                            tns_id=str(self._cell(row, header_idx, "tns_id") or ""),
+                            error_type="row_error",
+                            error_message=str(exc),
+                            raw_row={headers[i]: row[i] for i in range(min(len(headers), len(row)))},
                         )
-                        .order_by(TrainingSession.c.training_date.desc() if "training_date" in TrainingSession.c else TrainingSession.c.created_at.desc())
-                        .limit(1)
                     )
-                    sess_id = (await self.db.execute(q_sess)).scalar_one_or_none()
-                    if not sess_id:
-                        row_errors.append(
-                            UploadRowError(
-                                upload_run_id=upload_run_id,
-                                row_number=row_number,
-                                farmer_id=farmer_id_uuid,
-                                tns_id=str(cell(row, "tns_id") or ""),
-                                error_type="attendance_error",
-                                error_message=f"No training_session found for module {module_key} in this farmer_group",
-                                raw_row={headers[i]: row[i] for i in range(min(len(headers), len(row)))},
-                            )
-                        )
-                        continue
 
-                    # upsert attendance row (project+farmer+session)
-                    q_att = (
-                        select(Attendance.c.id)
-                        .where(
-                            Attendance.c.project_id == project_id if "project_id" in Attendance.c else True,
-                            Attendance.c.farmer_id == farmer_id_uuid,
-                            Attendance.c.training_session_id == sess_id,
-                        )
-                        .limit(1)
-                    )
-                    att_id = (await self.db.execute(q_att)).scalar_one_or_none()
-
-                    values = {}
-                    if "attended" in Attendance.c:
-                        values["attended"] = attended
-                    elif "status" in Attendance.c:
-                        values["status"] = "Present" if attended else "Absent"
-
-                    if att_id:
-                        if values:
-                            await self.db.execute(update(Attendance).where(Attendance.c.id == att_id).values(**values))
-                    else:
-                        ins = {
-                            "farmer_id": farmer_id_uuid,
-                            "training_session_id": sess_id,
-                        }
-                        if "project_id" in Attendance.c:
-                            ins["project_id"] = project_id
-                        if values:
-                            ins.update(values)
-                        await self.db.execute(insert(Attendance).values(**ins))
-
-                success += 1
-
-                # except Exception as e:
-                #     failed += 1
-                #     row_errors.append(
-                #         UploadRowError(
-                #             upload_run_id=upload_run_id,
-                #             row_number=row_number,
-                #             farmer_id=farmer_id_uuid,
-                #             tns_id=str(cell(row, "tns_id") or ""),
-                #             error_type="validation_error",
-                #             error_message=str(e),
-                #             raw_row={headers[i]: row[i] for i in range(min(len(headers), len(row)))},
-                #         )
-                #     )
-
-                if (row_number % 50) == 0:
-                    run.progress = min(90, int((row_number / max(ws.max_row, 2)) * 80) + 10)
+                processed = success_count + failed_count
+                run.success_count = success_count
+                run.failed_count = failed_count
+                run.remaining_count = max(run.total_rows - processed, 0)
+                run.progress = min(95, 10 + int((processed / max(run.total_rows, 1)) * 85))
+                if processed % 25 == 0:
                     await self.db.commit()
 
             if row_errors:
                 await self.repo.bulk_add_row_errors(row_errors)
 
-            run.success_count = success
-            run.failed_count = failed
+            run.success_count = success_count
+            run.failed_count = failed_count
             run.remaining_count = 0
             run.progress = 100
-            run.status = "failed" if (failed > 0) else "completed"
+            run.status = "failed" if failed_count > 0 else "completed"
             run.completed_at = datetime.utcnow()
             await self.db.commit()
+        except Exception as exc:
+            await self._fail_run(run, message=str(exc))
 
-        except Exception:
-            run.status = "failed"
-            run.completed_at = datetime.utcnow()
-            await self.db.commit()
+    async def _process_single_row(
+        self,
+        *,
+        run: UploadRun,
+        row_number: int,
+        row,
+        headers: list[str],
+        header_idx: dict[str, int],
+        module_cols: list[tuple[int, str]],
+        module_uuid_by_key: Dict[str, UUID],
+        row_errors: list[UploadRowError],
+    ) -> None:
+        farmer_identifier = str(self._cell(row, header_idx, "farmer_sf_id") or "").strip()
+        from_sf_raw = self._cell(row, header_idx, "from_sf")
+        from_sf: bool | None = None
+        if from_sf_raw not in (None, ""):
+            from_sf = str(from_sf_raw).strip().lower() in ("1", "true", "yes")
+
+        tns_id = str(self._cell(row, header_idx, "tns_id") or "").strip()
+        ffg_id = str(self._cell(row, header_idx, "ffg_id") or "").strip()
+        hh_number_raw = self._cell(row, header_idx, "hh_number")
+        farmer_number_raw = self._cell(row, header_idx, "farmer_number")
+
+        if not farmer_identifier:
+            raise ValidationError("Missing farmer identifier")
+        if not ffg_id:
+            raise ValidationError("Missing ffg_id")
+        if hh_number_raw in (None, ""):
+            raise ValidationError("Missing hh_number")
+        if farmer_number_raw in (None, ""):
+            raise ValidationError("Missing farmer_number")
+
+        try:
+            hh_number = int(hh_number_raw)
+            farmer_number = int(farmer_number_raw)
+        except Exception as exc:
+            raise ValidationError("hh_number and farmer_number must be integers") from exc
+
+        if farmer_number not in (1, 2):
+            raise ValidationError("farmer_number must be 1 or 2")
+
+        farmer_data = await self.repo.resolve_farmer_for_project(
+            project_id=run.project_id,
+            identifier=farmer_identifier,
+            from_sf=from_sf,
+        )
+        if not farmer_data:
+            raise NotFoundError("Farmer not found for this project")
+
+        farmer_id, _current_group_id = farmer_data
+        target_group_id = await self.repo.resolve_group_by_tns(project_id=run.project_id, ffg_id=ffg_id)
+        if not target_group_id:
+            raise ValidationError(f"Unknown ffg_id: {ffg_id}")
+
+        household_identifier = self._cell(row, header_idx, "sf_household_id") or self._cell(row, header_idx, "household_id")
+        household_id = None
+        if household_identifier:
+            household_id = await self.repo.resolve_household_id(identifier=str(household_identifier), from_sf=from_sf)
+
+        if not household_id:
+            household_id = await self.repo.find_household_by_group_number(
+                farmer_group_id=target_group_id,
+                household_number=hh_number,
+            )
+
+        if not household_id:
+            household_values = self._build_household_values(
+                target_group_id=target_group_id,
+                run=run,
+                ffg_id=ffg_id,
+                hh_number=hh_number,
+                row=row,
+                header_idx=header_idx,
+            )
+            household_id = await self.repo.create_household(values=household_values)
+
+        member_count = await self.repo.count_household_members(household_id=household_id, exclude_farmer_id=farmer_id)
+        if member_count >= 2:
+            raise ValidationError("A household cannot have more than 2 members")
+
+        is_primary = farmer_number == 1
+        if is_primary:
+            existing_primary = await self.repo.count_primary_members(household_id=household_id, exclude_farmer_id=farmer_id)
+            if existing_primary >= 1:
+                raise ValidationError("A household cannot have more than one primary member")
+
+        farmer_updates = self._build_farmer_updates(row=row, header_idx=header_idx, from_sf=from_sf)
+        farmer_updates["farmer_group_id"] = target_group_id
+        if "household_id" in T("farmers").c:
+            farmer_updates["household_id"] = household_id
+        if "is_primary_household_member" in T("farmers").c:
+            farmer_updates["is_primary_household_member"] = is_primary
+
+        farmer_composite = self._build_farmer_composite_id(ffg_id=ffg_id, hh_number=hh_number, farmer_number=farmer_number)
+        self._set_if_present(
+            farmer_updates,
+            T("farmers"),
+            ["composite_id", "farmer_composite_id", "participant_composite_id"],
+            farmer_composite,
+        )
+
+        household_updates = self._build_household_updates(
+            target_group_id=target_group_id,
+            ffg_id=ffg_id,
+            hh_number=hh_number,
+            row=row,
+            header_idx=header_idx,
+        )
+        if household_updates:
+            await self.repo.update_household(household_id=household_id, values=household_updates)
+
+        if farmer_updates:
+            if "updated_at" in T("farmers").c:
+                farmer_updates["updated_at"] = datetime.utcnow()
+            if "send_to_commcare" in T("farmers").c:
+                farmer_updates["send_to_commcare"] = True
+            if "send_to_commcare_status" in T("farmers").c:
+                farmer_updates["send_to_commcare_status"] = "Pending"
+            await self.repo.update_farmer(farmer_id=farmer_id, values=farmer_updates)
+
+        for index, module_key in module_cols:
+            if index >= len(row):
+                continue
+
+            value = row[index]
+            if value in (None, ""):
+                continue
+
+            module_id = module_uuid_by_key.get(module_key)
+            if not module_id:
+                continue
+
+            session_id = await self.repo.latest_session_id_for_group_module(
+                farmer_group_id=target_group_id,
+                module_id=module_id,
+            )
+            if not session_id:
+                row_errors.append(
+                    UploadRowError(
+                        upload_run_id=run.id,
+                        row_number=row_number,
+                        farmer_id=farmer_id,
+                        tns_id=tns_id,
+                        error_type="attendance_error",
+                        error_message=f"No training session found for module {module_key}",
+                        raw_row={headers[i]: row[i] for i in range(min(len(headers), len(row)))},
+                    )
+                )
+                continue
+
+            attended = str(value).strip().lower() in ("1", "true", "yes")
+            attendance_values = (
+                {"attended": attended}
+                if "attended" in T("attendances").c
+                else ({"status": "Present" if attended else "Absent"} if "status" in T("attendances").c else {})
+            )
+            attendance_id = await self.repo.attendance_id(
+                project_id=run.project_id,
+                farmer_id=farmer_id,
+                session_id=session_id,
+            )
+            await self.repo.upsert_attendance(
+                project_id=run.project_id,
+                farmer_id=farmer_id,
+                session_id=session_id,
+                values=attendance_values,
+                attendance_id=attendance_id,
+            )
+
+    def _build_farmer_updates(self, *, row, header_idx: dict[str, int], from_sf: bool | None) -> dict:
+        farmer_table = T("farmers")
+        updates: dict = {}
+
+        editable_columns = [
+            "tns_id",
+            "first_name",
+            "middle_name",
+            "last_name",
+            "gender",
+            "age",
+            "phone_number",
+            "coop_membership_number",
+            "status",
+            "farmer_status",
+            "create_in_commcare",
+        ]
+
+        for column in editable_columns:
+            if column not in farmer_table.c:
+                continue
+            value = self._cell(row, header_idx, column)
+            if value in (None, ""):
+                continue
+            if column == "age":
+                value = int(value)
+            elif column == "create_in_commcare":
+                value = str(value).strip().lower() in ("1", "true", "yes")
+            updates[column] = value
+
+        if "from_sf" in farmer_table.c and from_sf is not None:
+            updates["from_sf"] = from_sf
+
+        return updates
+
+    def _build_household_values(
+        self,
+        *,
+        target_group_id: UUID,
+        run: UploadRun,
+        ffg_id: str,
+        hh_number: int,
+        row,
+        header_idx: dict[str, int],
+    ) -> dict:
+        household = T("households")
+        values = {}
+        if "farmer_group_id" in household.c:
+            values["farmer_group_id"] = target_group_id
+        if "project_id" in household.c:
+            values["project_id"] = run.project_id
+        if "household_number" in household.c:
+            values["household_number"] = hh_number
+
+        self._set_if_present(
+            values,
+            household,
+            ["composite_id", "household_composite_id", "composite_household_id"],
+            self._build_household_composite_id(ffg_id=ffg_id, hh_number=hh_number),
+        )
+
+        updates = self._household_shared_metrics(row=row, header_idx=header_idx)
+        values.update(updates)
+        return values
+
+    def _build_household_updates(
+        self,
+        *,
+        target_group_id: UUID,
+        ffg_id: str,
+        hh_number: int,
+        row,
+        header_idx: dict[str, int],
+    ) -> dict:
+        household = T("households")
+        values = {}
+        if "farmer_group_id" in household.c:
+            values["farmer_group_id"] = target_group_id
+        if "household_number" in household.c:
+            values["household_number"] = hh_number
+
+        self._set_if_present(
+            values,
+            household,
+            ["composite_id", "household_composite_id", "composite_household_id"],
+            self._build_household_composite_id(ffg_id=ffg_id, hh_number=hh_number),
+        )
+
+        values.update(self._household_shared_metrics(row=row, header_idx=header_idx))
+        return values
+
+    def _household_shared_metrics(self, *, row, header_idx: dict[str, int]) -> dict:
+        household = T("households")
+        values = {}
+
+        coffee_trees = self._cell(row, header_idx, "coffee_tree_numbers")
+        if coffee_trees not in (None, "") and "number_of_trees" in household.c:
+            values["number_of_trees"] = int(coffee_trees)
+
+        coffee_plots = self._cell(row, header_idx, "number_of_coffee_plots")
+        if coffee_plots not in (None, ""):
+            if "farm_size" in household.c:
+                values["farm_size"] = coffee_plots
+            elif "number_of_coffee_plots" in household.c:
+                values["number_of_coffee_plots"] = coffee_plots
+
+        if values and "updated_at" in household.c:
+            values["updated_at"] = datetime.utcnow()
+        return values
+
+    @staticmethod
+    def _build_household_composite_id(*, ffg_id: str, hh_number: int) -> str:
+        return f"{ffg_id}-{hh_number}"
+
+    @staticmethod
+    def _build_farmer_composite_id(*, ffg_id: str, hh_number: int, farmer_number: int) -> str:
+        return f"{ffg_id}-{hh_number}-{farmer_number}"
+
+    @staticmethod
+    def _set_if_present(target: dict, table_obj, candidate_columns: list[str], value):
+        for col in candidate_columns:
+            if col in table_obj.c:
+                target[col] = value
+                return
+
+    @staticmethod
+    def _cell(row, header_idx: dict[str, int], key: str):
+        index = header_idx.get(key)
+        if index is None or index >= len(row):
+            return None
+        return row[index]
+
+    async def _fail_run(self, run: UploadRun, *, message: str, failed_rows: int | None = None) -> None:
+        run.status = "failed"
+        run.completed_at = datetime.utcnow()
+        run.progress = 100
+        if failed_rows is not None:
+            run.failed_count = failed_rows
+            run.remaining_count = 0
+            run.total_rows = max(run.total_rows, failed_rows)
+        run.meta = {**(run.meta or {}), "error": message}
+        await self.db.commit()
 
     # ---------------- Upload queries ----------------
     async def get_upload_job(self, upload_id: UUID) -> UploadJob:
         run = await self.repo.get_upload_run(upload_id)
         if not run:
-            raise ValueError("Upload not found")
+            raise NotFoundError("Upload not found")
 
         original_url = signed_get_url(run.gcs_object_name) if run.gcs_object_name else None
         error_url = signed_get_url(run.error_gcs_object_name) if run.error_gcs_object_name else None
+
+        if not original_url and run.gcs_object_name:
+            original_url = f"{settings.api_prefix}/farmers/uploads/{run.id}/original-file"
+        if not error_url and run.error_gcs_object_name:
+            error_url = f"{settings.api_prefix}/farmers/uploads/{run.id}/error-report"
 
         return UploadJob(
             id=run.id,
@@ -611,6 +1028,88 @@ class FarmersService:
         jobs = [await self.get_upload_job(x.id) for x in items]
         total_pages = (total + page_size - 1) // page_size
         return UploadHistoryResponse(items=jobs, total=total, page=page, page_size=page_size, total_pages=total_pages)
+
+    async def reupload_to_run(
+        self,
+        *,
+        upload_id: UUID,
+        file_name: str,
+        content_type: str | None,
+        file_bytes: bytes,
+        uploaded_by_id: UUID | None,
+    ) -> UploadJob:
+        parent = await self.repo.get_upload_run(upload_id)
+        if not parent:
+            raise NotFoundError("Upload not found")
+
+        if parent.status != "validation_errored":
+            raise ConflictError("Reupload is only allowed for validation-errored runs")
+
+        active = await self.repo.get_active_upload(project_id=parent.project_id)
+        if active:
+            raise ConflictError("Cannot reupload while another run is processing")
+
+        child = await self._create_upload_run(
+            project_id=parent.project_id,
+            file_name=file_name,
+            content_type=content_type,
+            file_bytes=file_bytes,
+            uploaded_by_id=uploaded_by_id,
+            parent_upload_id=parent.id,
+        )
+        await self._validate_or_queue_run(run=child, file_bytes=file_bytes)
+        return await self.get_upload_job(child.id)
+
+    async def retry_upload(self, *, upload_id: UUID, mode: str) -> UploadJob:
+        run = await self.repo.get_upload_run(upload_id)
+        if not run:
+            raise NotFoundError("Upload not found")
+        if not run.gcs_object_name:
+            raise ValidationError("Original upload file is missing")
+
+        retry = UploadRun(
+            project_id=run.project_id,
+            filename=run.filename,
+            content_type=run.content_type,
+            file_size_bytes=run.file_size_bytes,
+            gcs_bucket=run.gcs_bucket,
+            gcs_object_name=run.gcs_object_name,
+            gcs_uri=run.gcs_uri,
+            status="uploading",
+            progress=0,
+            total_rows=0,
+            success_count=0,
+            failed_count=0,
+            remaining_count=0,
+            uploaded_by_id=run.uploaded_by_id,
+            parent_upload_id=run.id,
+            uploaded_at=datetime.utcnow(),
+            meta={"retry_mode": mode},
+        )
+        retry = await self.repo.create_upload_run(retry)
+        return await self.get_upload_job(retry.id)
+
+    async def get_upload_original_file_bytes(self, upload_id: UUID) -> tuple[bytes, str, str]:
+        run = await self.repo.get_upload_run(upload_id)
+        if not run:
+            raise NotFoundError("Upload not found")
+        if not run.gcs_object_name:
+            raise ValidationError("Original upload file is missing")
+
+        content = download_bytes(run.gcs_object_name)
+        content_type = run.content_type or "application/octet-stream"
+        filename = run.filename or f"upload-{upload_id}"
+        return content, content_type, filename
+
+    async def get_upload_error_report_bytes(self, upload_id: UUID) -> tuple[bytes, str, str]:
+        run = await self.repo.get_upload_run(upload_id)
+        if not run:
+            raise NotFoundError("Upload not found")
+        if not run.error_gcs_object_name:
+            raise NotFoundError("No validation error report available for this run")
+
+        content = download_bytes(run.error_gcs_object_name)
+        return content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"validation-errors-{run.id}.xlsx"
 
     async def failed_rows(self, upload_id: UUID) -> list[FailedRow]:
         errs = await self.repo.list_failed_rows(upload_id)

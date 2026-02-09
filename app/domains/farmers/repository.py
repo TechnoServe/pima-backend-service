@@ -403,6 +403,7 @@ class FarmersRepository:
         project_id: UUID,
         identifier: str,
         from_sf: bool | None,
+        active_only: bool = False,
     ) -> tuple[UUID, UUID] | None:
         Farmer = T("farmers")
         FarmerGroup = T("farmer_groups")
@@ -415,6 +416,7 @@ class FarmersRepository:
                     match_col == identifier,
                     FarmerGroup.c.project_id == project_id,
                     Farmer.c.is_deleted.is_(False),
+                    *( [func.lower(func.coalesce(Farmer.c.status, "")).eq("active")] if active_only and "status" in Farmer.c else [] ),
                 )
                 .limit(1)
             )
@@ -524,6 +526,15 @@ class FarmersRepository:
         return (await self.db.execute(stmt)).scalar_one()
 
 
+
+    async def is_farmer_active(self, *, farmer_id: UUID) -> bool:
+        Farmer = T("farmers")
+        if "status" not in Farmer.c:
+            return True
+        q = select(func.lower(func.coalesce(Farmer.c.status, ""))).where(Farmer.c.id == farmer_id).limit(1)
+        status_value = (await self.db.execute(q)).scalar_one_or_none()
+        return status_value == "active"
+
     async def get_farmer_current_state(self, *, farmer_id: UUID) -> tuple[UUID | None, bool | None]:
         Farmer = T("farmers")
         primary_col = Farmer.c.is_primary_household_member if "is_primary_household_member" in Farmer.c else literal(None)
@@ -533,9 +544,21 @@ class FarmersRepository:
             return None, None
         return row[0], row[1]
 
+
+    async def get_household_state(self, *, household_id: UUID) -> tuple[UUID | None, int | None]:
+        Household = T("households")
+        hh_num_col = Household.c.household_number if "household_number" in Household.c else literal(None)
+        q = select(Household.c.farmer_group_id, hh_num_col).where(Household.c.id == household_id).limit(1)
+        row = (await self.db.execute(q)).first()
+        if not row:
+            return None, None
+        return row[0], row[1]
+
     async def count_household_members(self, *, household_id: UUID, exclude_farmer_id: UUID | None = None) -> int:
         Farmer = T("farmers")
         q = select(func.count()).where(Farmer.c.household_id == household_id, Farmer.c.is_deleted.is_(False))
+        if "status" in Farmer.c:
+            q = q.where(func.lower(func.coalesce(Farmer.c.status, "")) == "active")
         if exclude_farmer_id:
             q = q.where(Farmer.c.id != exclude_farmer_id)
         return (await self.db.execute(q)).scalar_one() or 0
@@ -549,6 +572,8 @@ class FarmersRepository:
             Farmer.c.is_deleted.is_(False),
             Farmer.c.is_primary_household_member.is_(True),
         )
+        if "status" in Farmer.c:
+            q = q.where(func.lower(func.coalesce(Farmer.c.status, "")) == "active")
         if exclude_farmer_id:
             q = q.where(Farmer.c.id != exclude_farmer_id)
         return (await self.db.execute(q)).scalar_one() or 0

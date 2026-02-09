@@ -224,11 +224,11 @@ class FarmersService:
                 r.get("phone_number") if r.get("phone_number") is not None else "",
                 r.get("coop_membership_number") if r.get("coop_membership_number") is not None else "",
                 r.get("location") or "",
-                str(r.get("farmer_sf_id") or r.get("farmer_id") or "") if bool(r.get("from_sf")) else str(r.get("farmer_id") or r.get("farmer_sf_id") or ""),
+                str(r.get("farmer_sf_id") or r.get("farmer_id") or ""),
                 bool(r.get("from_sf")),
                 r.get("tns_id") or "",
                 r.get("hh_number") if r.get("hh_number") is not None else "",
-                str(r.get("sf_household_id") or r.get("household_id") or "") if bool(r.get("from_sf")) else str(r.get("household_id") or r.get("sf_household_id") or ""),
+                str(r.get("sf_household_id") or r.get("household_id") or ""),
                 r.get("farmer_number") if r.get("farmer_number") is not None else "",
                 r.get("ffg_id") or "",
                 r.get("training_group") or "",
@@ -384,8 +384,8 @@ class FarmersService:
         for err in base_validation.errors:
             issues.append({"row_number": 1, "field": err.column or "header", "error_type": err.type, "message": err.message})
 
-        # if issues:
-            # return issues
+        if issues:
+            return issues
 
         wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
         ws = wb.active
@@ -428,11 +428,14 @@ class FarmersService:
                 project_id=run.project_id,
                 identifier=farmer_identifier,
                 from_sf=from_sf,
+            active_only=True,
             )
             if not farmer_data:
                 continue
 
             farmer_id, _ = farmer_data
+            if not await self.repo.is_farmer_active(farmer_id=farmer_id):
+                continue
             if farmer_id in validation_ctx["prepared_farmers"]:
                 continue
 
@@ -455,17 +458,19 @@ class FarmersService:
         ffg_id = str(self._cell(row, header_idx, "ffg_id") or "").strip()
         hh_number_raw = self._cell(row, header_idx, "hh_number")
         farmer_number_raw = self._cell(row, header_idx, "farmer_number")
-        household_identifier = self._cell(row, header_idx, "sf_household_id") or self._cell(row, header_idx, "household_id")
 
         if not farmer_identifier:
             add("farmer_sf_id", "Missing farmer identifier")
             return issues
 
-        farmer_data = await self.repo.resolve_farmer_for_project(project_id=run.project_id, identifier=farmer_identifier, from_sf=from_sf)
+        farmer_data = await self.repo.resolve_farmer_for_project(project_id=run.project_id, identifier=farmer_identifier, from_sf=from_sf, active_only=True)
         if not farmer_data:
             add("farmer_sf_id", "Farmer not found for this project")
             return issues
         farmer_id, _ = farmer_data
+
+        if not await self.repo.is_farmer_active(farmer_id=farmer_id):
+            return issues
 
         if farmer_id in validation_ctx["assigned_farmers"]:
             add("farmer_sf_id", "Farmer appears multiple times in the same upload")
@@ -496,14 +501,10 @@ class FarmersService:
             add("farmer_number", "farmer_number must be 1 or 2")
             return issues
 
-        household_id = None
-        if household_identifier:
-            household_id = await self.repo.resolve_household_id(identifier=str(household_identifier), from_sf=from_sf)
-            if not household_id:
-                add("sf_household_id", "Provided household identifier was not found")
-
-        if not household_id:
-            household_id = await self.repo.find_household_by_group_number(farmer_group_id=target_group_id, household_number=hh_number)
+        household_id = await self.repo.find_household_by_group_number(
+            farmer_group_id=target_group_id,
+            household_number=hh_number,
+        )
 
         household_key = household_id or f"new:{target_group_id}:{hh_number}"
 
@@ -718,25 +719,23 @@ class FarmersService:
             project_id=run.project_id,
             identifier=farmer_identifier,
             from_sf=from_sf,
+            active_only=True,
         )
         if not farmer_data:
             raise NotFoundError("Farmer not found for this project")
 
         farmer_id, _current_group_id = farmer_data
+        if not await self.repo.is_farmer_active(farmer_id=farmer_id):
+            return
+
         target_group_id = await self.repo.resolve_group_by_tns(project_id=run.project_id, ffg_id=ffg_id)
         if not target_group_id:
             raise ValidationError(f"Unknown ffg_id: {ffg_id}")
 
-        household_identifier = self._cell(row, header_idx, "sf_household_id") or self._cell(row, header_idx, "household_id")
-        household_id = None
-        if household_identifier:
-            household_id = await self.repo.resolve_household_id(identifier=str(household_identifier), from_sf=from_sf)
-
-        if not household_id:
-            household_id = await self.repo.find_household_by_group_number(
-                farmer_group_id=target_group_id,
-                household_number=hh_number,
-            )
+        household_id = await self.repo.find_household_by_group_number(
+            farmer_group_id=target_group_id,
+            household_number=hh_number,
+        )
 
         if not household_id:
             household_values = self._build_household_values(

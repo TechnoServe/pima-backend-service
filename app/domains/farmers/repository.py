@@ -407,21 +407,27 @@ class FarmersRepository:
     ) -> tuple[UUID, UUID] | None:
         Farmer = T("farmers")
         FarmerGroup = T("farmer_groups")
+
         def _query(match_col):
+            conditions = [
+                match_col == identifier,
+                FarmerGroup.c.project_id == project_id,
+                Farmer.c.is_deleted.is_(False),
+            ]
+
+            if "status" in Farmer.c:
+                conditions.append(
+                    Farmer.c.status == "Active"
+                )
+
             return (
                 select(Farmer.c.id, Farmer.c.farmer_group_id)
                 .select_from(Farmer)
                 .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
-                .where(
-                    match_col == identifier,
-                    FarmerGroup.c.project_id == project_id,
-                    Farmer.c.is_deleted.is_(False),
-                    *( [func.lower(func.coalesce(Farmer.c.status, "")).eq("active")] if active_only and "status" in Farmer.c else [] ),
-                )
+                .where(*conditions)
                 .limit(1)
             )
 
-        query_order = []
         if from_sf is True and "sf_id" in Farmer.c:
             query_order = [Farmer.c.sf_id, Farmer.c.id]
         elif from_sf is False:
@@ -434,7 +440,6 @@ class FarmersRepository:
             if row:
                 return row[0], row[1]
         return None
-
     async def resolve_household_id(self, *, identifier: str, from_sf: bool | None) -> UUID | None:
         Household = T("households")
         order = []
@@ -531,9 +536,9 @@ class FarmersRepository:
         Farmer = T("farmers")
         if "status" not in Farmer.c:
             return True
-        q = select(func.lower(func.coalesce(Farmer.c.status, ""))).where(Farmer.c.id == farmer_id).limit(1)
+        q = select(Farmer.c.status).where(Farmer.c.id == farmer_id).limit(1)
         status_value = (await self.db.execute(q)).scalar_one_or_none()
-        return status_value == "active"
+        return status_value == "Active"
 
     async def get_farmer_current_state(self, *, farmer_id: UUID) -> tuple[UUID | None, bool | None]:
         Farmer = T("farmers")
@@ -558,7 +563,7 @@ class FarmersRepository:
         Farmer = T("farmers")
         q = select(func.count()).where(Farmer.c.household_id == household_id, Farmer.c.is_deleted.is_(False))
         if "status" in Farmer.c:
-            q = q.where(func.lower(func.coalesce(Farmer.c.status, "")) == "active")
+            q = q.where(Farmer.c.status == "Active")
         if exclude_farmer_id:
             q = q.where(Farmer.c.id != exclude_farmer_id)
         return (await self.db.execute(q)).scalar_one() or 0
@@ -573,7 +578,7 @@ class FarmersRepository:
             Farmer.c.is_primary_household_member.is_(True),
         )
         if "status" in Farmer.c:
-            q = q.where(func.lower(func.coalesce(Farmer.c.status, "")) == "active")
+            q = q.where(Farmer.c.status == "Active")
         if exclude_farmer_id:
             q = q.where(Farmer.c.id != exclude_farmer_id)
         return (await self.db.execute(q)).scalar_one() or 0

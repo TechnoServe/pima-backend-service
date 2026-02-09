@@ -276,9 +276,12 @@ class FarmersRepository:
                 coop_membership_col.label("coop_membership_number"),
                 loc_name_col.label("location"),
                 farmer_sf_col.label("farmer_sf_id"),
+                Farmer.c.id.label("farmer_id"),
+                (Farmer.c.from_sf if "from_sf" in Farmer.c else literal(None)).label("from_sf"),
                 farmer_tns_col.label("tns_id"),
                 hh_number_col.label("hh_number"),
                 hh_sf_col.label("sf_household_id"),
+                Household.c.id.label("household_id"),
                 # farmer_number: match your historical file logic (1 = primary, 2 = secondary)
                 case(
                     (is_primary_col.is_(True), literal(1)),

@@ -221,14 +221,11 @@ class FarmersRepository:
         phone_col = Farmer.c.phone_number if "phone_number" in Farmer.c else literal(None)
 
         # optional fields in your csv (if missing in DB -> None)
-        coffee_tree_numbers_col = (
-            Farmer.c.coffee_tree_numbers
-            if "coffee_tree_numbers" in Farmer.c
-            else (Household.c.number_of_trees if "number_of_trees" in Household.c else literal(None))
-        )
+        # Shared household values: all farmers in same household export same values.
+        coffee_tree_numbers_col = Household.c.number_of_trees if "number_of_trees" in Household.c else literal(None)
         number_of_coffee_plots_col = (
-            Farmer.c.number_of_coffee_plots
-            if "number_of_coffee_plots" in Farmer.c
+            Household.c.farm_size
+            if "farm_size" in Household.c
             else (Household.c.number_of_coffee_plots if "number_of_coffee_plots" in Household.c else literal(None))
         )
         coop_membership_col = (
@@ -482,6 +479,56 @@ class FarmersRepository:
         if "project_id" in Attendance.c:
             ins["project_id"] = project_id
         await self.db.execute(insert(Attendance).values(**ins))
+
+
+    async def resolve_group_by_tns(self, *, project_id: UUID, ffg_id: str) -> UUID | None:
+        FarmerGroup = T("farmer_groups")
+        q = (
+            select(FarmerGroup.c.id)
+            .where(FarmerGroup.c.project_id == project_id, FarmerGroup.c.tns_id == ffg_id)
+            .limit(1)
+        )
+        return (await self.db.execute(q)).scalar_one_or_none()
+
+    async def find_household_by_group_number(self, *, farmer_group_id: UUID, household_number: int) -> UUID | None:
+        Household = T("households")
+        if "household_number" not in Household.c:
+            return None
+        q = (
+            select(Household.c.id)
+            .where(Household.c.farmer_group_id == farmer_group_id, Household.c.household_number == household_number)
+            .limit(1)
+        )
+        return (await self.db.execute(q)).scalar_one_or_none()
+
+    async def create_household(self, *, values: dict) -> UUID:
+        Household = T("households")
+        stmt = insert(Household).values(**values).returning(Household.c.id)
+        return (await self.db.execute(stmt)).scalar_one()
+
+    async def count_household_members(self, *, household_id: UUID, exclude_farmer_id: UUID | None = None) -> int:
+        Farmer = T("farmers")
+        q = select(func.count()).where(Farmer.c.household_id == household_id, Farmer.c.is_deleted.is_(False))
+        if exclude_farmer_id:
+            q = q.where(Farmer.c.id != exclude_farmer_id)
+        return (await self.db.execute(q)).scalar_one() or 0
+
+    async def count_primary_members(self, *, household_id: UUID, exclude_farmer_id: UUID | None = None) -> int:
+        Farmer = T("farmers")
+        if "is_primary_household_member" not in Farmer.c:
+            return 0
+        q = select(func.count()).where(
+            Farmer.c.household_id == household_id,
+            Farmer.c.is_deleted.is_(False),
+            Farmer.c.is_primary_household_member.is_(True),
+        )
+        if exclude_farmer_id:
+            q = q.where(Farmer.c.id != exclude_farmer_id)
+        return (await self.db.execute(q)).scalar_one() or 0
+
+    async def update_household(self, *, household_id: UUID, values: dict) -> None:
+        Household = T("households")
+        await self.db.execute(update(Household).where(Household.c.id == household_id).values(**values))
 
     # ---------------- CommCare flagging ----------------
     async def flag_farmers_send_to_commcare(self, *, project_id: UUID) -> int:

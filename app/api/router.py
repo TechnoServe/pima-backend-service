@@ -6,6 +6,7 @@ from app.auth.router import router as auth_router
 from app.domains.attendances.router import router as attendances_router
 from app.domains.checks.router import router as checks_router
 from app.domains.coffee_varieties.router import router as coffee_varieties_router
+from app.domains.data_verification.router import router as data_verification_router
 from app.domains.farm_visits.router import router as farm_visits_router
 from app.domains.farmer_groups.router import router as farmer_groups_router
 from app.domains.farmers.router import router as farmers_router
@@ -49,6 +50,7 @@ router.include_router(farmers_router)
 
 router.include_router(training_modules_router)
 router.include_router(training_sessions_router)
+router.include_router(data_verification_router)
 router.include_router(attendances_router)
 
 router.include_router(farm_visits_router)

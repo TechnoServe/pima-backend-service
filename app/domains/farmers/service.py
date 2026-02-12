@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Dict, List
 from uuid import UUID
@@ -21,6 +21,7 @@ from app.shared.api_errors import (
     NotFoundError,
     ValidationError,
 )
+
 from app.domains.farmers.schemas import (
     PaginatedFarmersResponse,
     FarmerListItem,
@@ -48,6 +49,59 @@ def before_update(payload: dict, entity: str) -> dict:
 
 def T(name: str):
     return get_table(name)
+
+
+def pad2(n: int) -> str:
+    return str(int(n)).zfill(2)
+
+
+def build_household_name(hh_number: int) -> str:
+    # 1 -> "01", 9 -> "09", 10 -> "10"
+    return pad2(hh_number)
+
+
+def build_household_tns_id(ffg_id: str, hh_number: int) -> str:
+    # household 1 -> GGG2201, household 11 -> GGG2211
+    return f"{ffg_id}{pad2(hh_number)}"
+
+
+def build_household_composite(ffg_id: str, hh_number: int) -> str:
+    # IMPORTANT: composite uses padded household number
+    return f"{ffg_id}-{pad2(hh_number)}"
+
+
+def build_farmer_composite(ffg_id: str, hh_number: int, farmer_number: int) -> str:
+    # IMPORTANT: composite uses padded household number
+    return f"{ffg_id}-{pad2(hh_number)}-{farmer_number}"
+
+
+def build_tns_id(ffg_id: str, hh_number: int, farmer_number: int) -> str:
+    # farmer: primary in household 1 -> GGG22011, secondary -> GGG22012
+    return f"{ffg_id}{pad2(hh_number)}{farmer_number}"
+
+
+@dataclass(frozen=True)
+class NormalizedRow:
+    row_number: int
+    raw: dict
+
+    farmer_identifier: str
+    from_sf: bool | None
+
+    ffg_id: str
+    hh_number: int | None
+    farmer_number: int | None
+
+    status: str
+    is_active_row: bool
+
+    farmer_id: UUID | None
+
+
+@dataclass(frozen=True)
+class HouseholdKey:
+    ffg_id: str
+    hh_number: int
 
 
 class FarmersService:
@@ -91,7 +145,6 @@ class FarmersService:
         for r in rows:
             f = r["farmer"]
             m = getattr(f, "_mapping", f)
-
             full_name = " ".join([x for x in [m.get("first_name"), m.get("middle_name"), m.get("last_name")] if x])
 
             items.append(
@@ -158,12 +211,11 @@ class FarmersService:
             business_advisors=[],
         )
 
-    # ---------------- Export XLSX (mirrors your CSV exactly) ----------------
+    # ---------------- Export XLSX ----------------
     async def export_excel(self, *, project_id: UUID) -> bytes:
         modules = await self.repo.export_training_modules(project_id)
         base_rows = await self.repo.export_farmers_base_rows(project_id)
 
-        # EXACT columns (same as your uploaded CSV) + farmer_status added after status
         base_headers = [
             "num",
             "Project",
@@ -195,7 +247,7 @@ class FarmersService:
         for m in modules:
             module_number = m.get("module_number") or ""
             module_name = m.get("module_name") or ""
-            module_key = m.get("sf_id") or m.get("id")  # key in header end
+            module_key = m.get("sf_id") or m.get("id")
             module_headers.append(f"{module_number}-{module_name}-{module_key}")
 
         farmer_sf_ids = [str(r.get("farmer_sf_id") or "").strip() for r in base_rows if r.get("farmer_sf_id")]
@@ -252,14 +304,13 @@ class FarmersService:
 
     # ---------------- Upload validate + run ----------------
     def validate_upload(self, *, file_bytes: bytes) -> UploadValidationResult:
-        """Validate uploaded workbook structure before queueing/processing."""
         wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
         ws = wb.active
 
         headers = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
         header_set = {h.lower(): i for i, h in enumerate(headers)}
 
-        required = ["farmer_sf_id", "tns_id", "first_name", "last_name", "ffg_id", "hh_number", "farmer_number"]
+        required = ["farmer_sf_id", "first_name", "last_name", "ffg_id", "hh_number", "farmer_number"]
         errors: list[UploadValidationWarning] = []
         for key in required:
             if key not in header_set:
@@ -295,7 +346,6 @@ class FarmersService:
         file_bytes: bytes,
         uploaded_by_id: UUID | None,
     ) -> UploadJob:
-        """Create root upload run and validate it before allowing processing."""
         active = await self.repo.get_active_upload(project_id=project_id)
         if active:
             raise ConflictError("Cannot upload: another run is currently processing.")
@@ -329,7 +379,6 @@ class FarmersService:
         parent_upload_id: UUID | None,
     ) -> UploadRun:
         try:
-            print("Uploading file to storage...")
             gcs = upload_bytes(
                 project_id=str(project_id),
                 category="farmer-uploads",
@@ -337,7 +386,6 @@ class FarmersService:
                 content=file_bytes,
                 content_type=content_type,
             )
-            print(f"File uploaded to {gcs['gcs_uri']}")
         except Exception as exc:
             raise ExternalServiceError("Failed to upload file to storage", details={"reason": str(exc)}) from exc
 
@@ -377,159 +425,176 @@ class FarmersService:
         run.meta = {**(run.meta or {}), "validated": True}
         await self.db.commit()
 
+    # ---------------- NODE-STYLE VALIDATION ----------------
     async def _collect_validation_errors(self, *, run: UploadRun, file_bytes: bytes) -> list[dict]:
         issues: list[dict] = []
 
         base_validation = self.validate_upload(file_bytes=file_bytes)
         for err in base_validation.errors:
             issues.append({"row_number": 1, "field": err.column or "header", "error_type": err.type, "message": err.message})
-
         if issues:
             return issues
 
         wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
         ws = wb.active
+
         headers = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
         header_idx = {h.strip().lower(): i for i, h in enumerate(headers)}
 
-        validation_ctx = {
-            "prepared_farmers": set(),
-            "assigned_farmers": set(),
-            "member_delta": defaultdict(int),
-            "primary_delta": defaultdict(int),
-        }
-
         rows = list(ws.iter_rows(min_row=2, values_only=True))
 
-        # Pre-adjust context for all farmers in the file first, so validation is not row-order dependent.
-        await self._prepare_validation_ctx(run=run, rows=rows, header_idx=header_idx, validation_ctx=validation_ctx)
+        normalized, row_level_issues = await self._normalize_rows(run=run, headers=headers, header_idx=header_idx, rows=rows)
+        issues.extend(row_level_issues)
+        if issues:
+            return issues
 
-        for row_number, row in enumerate(rows, start=2):
-            row_issues = await self._validate_row_constraints(
-                run=run,
-                row_number=row_number,
-                row=row,
-                header_idx=header_idx,
-                validation_ctx=validation_ctx,
-            )
-            issues.extend(row_issues)
-
+        issues.extend(await self._validate_households(normalized))
+        issues.extend(self._validate_duplicate_farmers(normalized))
         return issues
 
-    async def _prepare_validation_ctx(self, *, run: UploadRun, rows: list, header_idx: dict[str, int], validation_ctx: dict) -> None:
-        for row in rows:
+    async def _normalize_rows(
+        self,
+        *,
+        run: UploadRun,
+        headers: list[str],
+        header_idx: dict[str, int],
+        rows: list,
+    ) -> tuple[list[NormalizedRow], list[dict]]:
+        issues: list[dict] = []
+        normalized: list[NormalizedRow] = []
+
+        def add(row_number: int, field: str, message: str, error_type: str = "validation_error"):
+            issues.append({"row_number": row_number, "field": field, "error_type": error_type, "message": message})
+
+        for i, row in enumerate(rows, start=2):
+            raw = {headers[j]: (row[j] if j < len(row) else None) for j in range(len(headers))}
+
             farmer_identifier = str(self._cell(row, header_idx, "farmer_sf_id") or "").strip()
             if not farmer_identifier:
+                add(i, "farmer_sf_id", "Missing farmer identifier")
                 continue
+
             from_sf_raw = self._cell(row, header_idx, "from_sf")
             from_sf = None if from_sf_raw in (None, "") else str(from_sf_raw).strip().lower() in ("1", "true", "yes")
+
+            ffg_id = str(self._cell(row, header_idx, "ffg_id") or "").strip()
+            if not ffg_id:
+                add(i, "ffg_id", "Missing ffg_id")
+                continue
+
+            hh_number_raw = self._cell(row, header_idx, "hh_number")
+            farmer_number_raw = self._cell(row, header_idx, "farmer_number")
+
+            hh_number: int | None = None
+            farmer_number: int | None = None
+
+            try:
+                hh_number = int(hh_number_raw) if hh_number_raw not in (None, "") else None
+            except Exception:
+                add(i, "hh_number", "hh_number must be an integer")
+                continue
+
+            try:
+                farmer_number = int(farmer_number_raw) if farmer_number_raw not in (None, "") else None
+            except Exception:
+                add(i, "farmer_number", "farmer_number must be an integer")
+                continue
+
+            if hh_number is None:
+                add(i, "hh_number", "Missing hh_number")
+                continue
+            if farmer_number is None:
+                add(i, "farmer_number", "Missing farmer_number")
+                continue
+            if farmer_number not in (1, 2):
+                add(i, "farmer_number", "farmer_number must be 1 or 2")
+                continue
+
+            status = str(self._cell(row, header_idx, "status") or "Active").strip()
+            is_active_row = status.lower() == "active"
 
             farmer_data = await self.repo.resolve_farmer_for_project(
                 project_id=run.project_id,
                 identifier=farmer_identifier,
                 from_sf=from_sf,
-            active_only=True,
+                active_only=False,
             )
-            if not farmer_data:
+            farmer_id = farmer_data[0] if farmer_data else None
+            if not farmer_id:
+                add(i, "farmer_sf_id", "Farmer not found for this project")
                 continue
 
-            farmer_id, _ = farmer_data
-            if not await self.repo.is_farmer_active(farmer_id=farmer_id):
-                continue
-            if farmer_id in validation_ctx["prepared_farmers"]:
-                continue
+            if is_active_row and not await self.repo.is_farmer_active(farmer_id=farmer_id):
+                is_active_row = False
 
-            validation_ctx["prepared_farmers"].add(farmer_id)
-            current_household_id, current_is_primary = await self.repo.get_farmer_current_state(farmer_id=farmer_id)
-            if current_household_id:
-                validation_ctx["member_delta"][current_household_id] -= 1
-                if current_is_primary:
-                    validation_ctx["primary_delta"][current_household_id] -= 1
+            normalized.append(
+                NormalizedRow(
+                    row_number=i,
+                    raw=raw,
+                    farmer_identifier=farmer_identifier,
+                    from_sf=from_sf,
+                    ffg_id=ffg_id,
+                    hh_number=hh_number,
+                    farmer_number=farmer_number,
+                    status=status,
+                    is_active_row=is_active_row,
+                    farmer_id=farmer_id,
+                )
+            )
 
-    async def _validate_row_constraints(self, *, run: UploadRun, row_number: int, row, header_idx: dict[str, int], validation_ctx: dict) -> list[dict]:
+        return normalized, issues
+
+    async def _validate_households(self, normalized: list[NormalizedRow]) -> list[dict]:
         issues: list[dict] = []
 
-        def add(field: str, message: str, error_type: str = "validation_error"):
-            issues.append({"row_number": row_number, "field": field, "error_type": error_type, "message": message})
+        def add(row_number: int, field: str, message: str):
+            issues.append({"row_number": row_number, "field": field, "error_type": "validation_error", "message": message})
 
-        farmer_identifier = str(self._cell(row, header_idx, "farmer_sf_id") or "").strip()
-        from_sf_raw = self._cell(row, header_idx, "from_sf")
-        from_sf = None if from_sf_raw in (None, "") else str(from_sf_raw).strip().lower() in ("1", "true", "yes")
-        ffg_id = str(self._cell(row, header_idx, "ffg_id") or "").strip()
-        hh_number_raw = self._cell(row, header_idx, "hh_number")
-        farmer_number_raw = self._cell(row, header_idx, "farmer_number")
+        active_rows = [r for r in normalized if r.is_active_row and r.hh_number is not None]
 
-        if not farmer_identifier:
-            add("farmer_sf_id", "Missing farmer identifier")
-            return issues
+        groups: dict[HouseholdKey, list[NormalizedRow]] = {}
+        for r in active_rows:
+            key = HouseholdKey(r.ffg_id, int(r.hh_number))
+            groups.setdefault(key, []).append(r)
 
-        farmer_data = await self.repo.resolve_farmer_for_project(project_id=run.project_id, identifier=farmer_identifier, from_sf=from_sf, active_only=True)
-        if not farmer_data:
-            add("farmer_sf_id", "Farmer not found for this project")
-            return issues
-        farmer_id, _ = farmer_data
+        for key, members in groups.items():
+            if len(members) > 2:
+                for m in members:
+                    add(m.row_number, "hh_number", f"Household {key.ffg_id}-{key.hh_number} has more than 2 active members")
+                continue
 
-        if not await self.repo.is_farmer_active(farmer_id=farmer_id):
-            return issues
+            primary_count = sum(1 for m in members if m.farmer_number == 1)
+            if primary_count > 1:
+                for m in members:
+                    add(m.row_number, "farmer_number", f"Household {key.ffg_id}-{key.hh_number} has more than one active primary member")
+                continue
 
-        if farmer_id in validation_ctx["assigned_farmers"]:
-            add("farmer_sf_id", "Farmer appears multiple times in the same upload")
-            return issues
+            if len(members) == 2:
+                has_primary = any(m.farmer_number == 1 for m in members)
+                has_secondary = any(m.farmer_number == 2 for m in members)
+                if not (has_primary and has_secondary):
+                    for m in members:
+                        add(m.row_number, "farmer_number", f"Household {key.ffg_id}-{key.hh_number} must have one primary (1) and one secondary (2) when 2 members are active")
+                    continue
 
-        if not ffg_id:
-            add("ffg_id", "Missing ffg_id")
-            return issues
+        return issues
 
-        target_group_id = await self.repo.resolve_group_by_tns(project_id=run.project_id, ffg_id=ffg_id)
-        if not target_group_id:
-            add("ffg_id", f"Unknown ffg_id: {ffg_id}")
-            return issues
+    def _validate_duplicate_farmers(self, normalized: list[NormalizedRow]) -> list[dict]:
+        issues: list[dict] = []
+        seen: set[UUID] = set()
 
-        try:
-            hh_number = int(hh_number_raw)
-        except Exception:
-            add("hh_number", "hh_number must be an integer")
-            return issues
+        def add(row_number: int, message: str):
+            issues.append({"row_number": row_number, "field": "farmer_sf_id", "error_type": "validation_error", "message": message})
 
-        try:
-            farmer_number = int(farmer_number_raw)
-        except Exception:
-            add("farmer_number", "farmer_number must be an integer")
-            return issues
-
-        if farmer_number not in (1, 2):
-            add("farmer_number", "farmer_number must be 1 or 2")
-            return issues
-
-        household_id = await self.repo.find_household_by_group_number(
-            farmer_group_id=target_group_id,
-            household_number=hh_number,
-        )
-
-        household_key = household_id or f"new:{target_group_id}:{hh_number}"
-
-        base_members = 0
-        base_primary = 0
-        if household_id:
-            base_members = await self.repo.count_household_members(household_id=household_id, exclude_farmer_id=farmer_id)
-            base_primary = await self.repo.count_primary_members(household_id=household_id, exclude_farmer_id=farmer_id)
-
-        projected_members = base_members + validation_ctx["member_delta"][household_key] + 1
-        if projected_members > 2:
-            add("hh_number", "A household cannot have more than 2 members")
-
-        if farmer_number == 1:
-            projected_primary = base_primary + validation_ctx["primary_delta"][household_key] + 1
-            if projected_primary > 1:
-                add("farmer_number", "A household cannot have more than one primary member")
-
-        if issues:
-            return issues
-
-        validation_ctx["assigned_farmers"].add(farmer_id)
-        validation_ctx["member_delta"][household_key] += 1
-        if farmer_number == 1:
-            validation_ctx["primary_delta"][household_key] += 1
+        for r in normalized:
+            if not r.is_active_row:
+                continue
+            if not r.farmer_id:
+                continue
+            if r.farmer_id in seen:
+                add(r.row_number, "Farmer appears multiple times as Active in the same upload")
+                continue
+            seen.add(r.farmer_id)
 
         return issues
 
@@ -546,7 +611,6 @@ class FarmersService:
             run.error_gcs_object_name = uploaded["object_name"]
             run.error_gcs_uri = uploaded["gcs_uri"]
         except Exception:
-            # keep status change even if report upload fails
             pass
 
         run.status = "validation_errored"
@@ -581,11 +645,13 @@ class FarmersService:
         wb.save(bio)
         return bio.getvalue()
 
+    # ---------------- Upload processing ----------------
     async def process_upload_run(self, *, upload_run_id: UUID, file_bytes: bytes | None = None) -> None:
-        """Background processor for queued upload runs."""
         run = await self.repo.get_upload_run(upload_run_id)
         if not run or run.status in {"completed", "failed", "cancelled", "validation_errored"}:
             return
+
+        group_id_by_ffg: dict[str, UUID] = {}
 
         try:
             run.status = "validating"
@@ -604,17 +670,31 @@ class FarmersService:
 
             wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
             ws = wb.active
+
             headers = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
             header_idx = {h.strip().lower(): i for i, h in enumerate(headers)}
 
             module_cols: list[tuple[int, str]] = []
-            for i, header in enumerate(headers):
+            for idx, header in enumerate(headers):
                 parts = (header or "").strip().split("-")
                 if len(parts) >= 3:
-                    module_cols.append((i, parts[-1].strip()))
+                    module_cols.append((idx, parts[-1].strip()))
 
             modules = await self.repo.export_training_modules(run.project_id)
             module_uuid_by_key: Dict[str, UUID] = {str(m.get("sf_id") or m["id"]): m["id"] for m in modules}
+
+            ffg_ids_in_file: set[str] = set()
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                ffg = self._cell(row, header_idx, "ffg_id")
+                if ffg not in (None, ""):
+                    ffg_ids_in_file.add(str(ffg).strip())
+
+            if ffg_ids_in_file:
+                await self._prefetch_group_ids_for_ffg_ids(
+                    project_id=run.project_id,
+                    ffg_ids=sorted(ffg_ids_in_file),
+                    out_map=group_id_by_ffg,
+                )
 
             run.total_rows = max((ws.max_row - 1 if ws.max_row else 0), 0)
             run.remaining_count = run.total_rows
@@ -628,16 +708,18 @@ class FarmersService:
 
             for row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
                 try:
-                    await self._process_single_row(
-                        run=run,
-                        row_number=row_number,
-                        row=row,
-                        headers=headers,
-                        header_idx=header_idx,
-                        module_cols=module_cols,
-                        module_uuid_by_key=module_uuid_by_key,
-                        row_errors=row_errors,
-                    )
+                    async with self.db.begin_nested():
+                        await self._process_single_row(
+                            run=run,
+                            row_number=row_number,
+                            row=row,
+                            headers=headers,
+                            header_idx=header_idx,
+                            module_cols=module_cols,
+                            module_uuid_by_key=module_uuid_by_key,
+                            row_errors=row_errors,
+                            group_id_by_ffg=group_id_by_ffg,
+                        )
                     success_count += 1
                 except Exception as exc:
                     failed_count += 1
@@ -659,7 +741,7 @@ class FarmersService:
                 run.remaining_count = max(run.total_rows - processed, 0)
                 run.progress = min(95, 10 + int((processed / max(run.total_rows, 1)) * 85))
                 if processed % 25 == 0:
-                    await self.db.commit()
+                    await self.db.flush()
 
             if row_errors:
                 await self.repo.bulk_add_row_errors(row_errors)
@@ -674,6 +756,30 @@ class FarmersService:
         except Exception as exc:
             await self._fail_run(run, message=str(exc))
 
+    async def _prefetch_group_ids_for_ffg_ids(self, *, project_id: UUID, ffg_ids: list[str], out_map: dict[str, UUID]) -> None:
+        FarmerGroup = T("farmer_groups")
+
+        candidate_cols = []
+        for c in ("ffg_id", "tns_id", "group_tns_id"):
+            if c in FarmerGroup.c:
+                candidate_cols.append(FarmerGroup.c[c])
+
+        if not candidate_cols:
+            return
+
+        key_col = candidate_cols[0]
+
+        q = (
+            select(FarmerGroup.c.id, key_col)
+            .where(FarmerGroup.c.project_id == project_id)
+            .where(key_col.in_(ffg_ids))
+        )
+        rows = (await self.db.execute(q)).all()
+        for gid, key in rows:
+            if key is None:
+                continue
+            out_map[str(key).strip()] = gid
+
     async def _process_single_row(
         self,
         *,
@@ -685,22 +791,24 @@ class FarmersService:
         module_cols: list[tuple[int, str]],
         module_uuid_by_key: Dict[str, UUID],
         row_errors: list[UploadRowError],
+        group_id_by_ffg: dict[str, UUID],
     ) -> None:
         farmer_identifier = str(self._cell(row, header_idx, "farmer_sf_id") or "").strip()
+        if not farmer_identifier:
+            raise ValidationError("Missing farmer identifier")
+
         from_sf_raw = self._cell(row, header_idx, "from_sf")
         from_sf: bool | None = None
         if from_sf_raw not in (None, ""):
             from_sf = str(from_sf_raw).strip().lower() in ("1", "true", "yes")
 
-        tns_id = str(self._cell(row, header_idx, "tns_id") or "").strip()
         ffg_id = str(self._cell(row, header_idx, "ffg_id") or "").strip()
+        if not ffg_id:
+            raise ValidationError("Missing ffg_id")
+
         hh_number_raw = self._cell(row, header_idx, "hh_number")
         farmer_number_raw = self._cell(row, header_idx, "farmer_number")
 
-        if not farmer_identifier:
-            raise ValidationError("Missing farmer identifier")
-        if not ffg_id:
-            raise ValidationError("Missing ffg_id")
         if hh_number_raw in (None, ""):
             raise ValidationError("Missing hh_number")
         if farmer_number_raw in (None, ""):
@@ -715,29 +823,40 @@ class FarmersService:
         if farmer_number not in (1, 2):
             raise ValidationError("farmer_number must be 1 or 2")
 
+        status = str(self._cell(row, header_idx, "status") or "Active").strip()
+        is_active_row = status.lower() == "active"
+
         farmer_data = await self.repo.resolve_farmer_for_project(
             project_id=run.project_id,
             identifier=farmer_identifier,
             from_sf=from_sf,
-            active_only=True,
+            active_only=False,
         )
         if not farmer_data:
             raise NotFoundError("Farmer not found for this project")
-
         farmer_id, _current_group_id = farmer_data
-        if not await self.repo.is_farmer_active(farmer_id=farmer_id):
-            return
 
-        target_group_id = await self.repo.resolve_group_by_tns(project_id=run.project_id, ffg_id=ffg_id)
+        if is_active_row and not await self.repo.is_farmer_active(farmer_id=farmer_id):
+            is_active_row = False
+
+        # Resolve group id using cache
+        target_group_id = group_id_by_ffg.get(ffg_id)
+        if not target_group_id:
+            target_group_id = await self.repo.resolve_group_by_tns(project_id=run.project_id, ffg_id=ffg_id)
+            if target_group_id:
+                group_id_by_ffg[ffg_id] = target_group_id
+
         if not target_group_id:
             raise ValidationError(f"Unknown ffg_id: {ffg_id}")
 
+        # Find household by (group, number)
         household_id = await self.repo.find_household_by_group_number(
             farmer_group_id=target_group_id,
             household_number=hh_number,
         )
 
         if not household_id:
+            # Create household + set created_by_id/last_updated_by_id to logged-in user (run.uploaded_by_id)
             household_values = self._build_household_values(
                 target_group_id=target_group_id,
                 run=run,
@@ -747,41 +866,50 @@ class FarmersService:
                 header_idx=header_idx,
             )
             household_id = await self.repo.create_household(values=household_values)
+        else:
+            # Update household farmer_group_id too (supports group moves)
+            household_updates = self._build_household_updates(
+                target_group_id=target_group_id,
+                ffg_id=ffg_id,
+                hh_number=hh_number,
+                row=row,
+                header_idx=header_idx,
+                last_updated_by_id=run.uploaded_by_id,
+            )
+            if household_updates:
+                await self.repo.update_household(household_id=household_id, values=household_updates)
 
-        member_count = await self.repo.count_household_members(household_id=household_id, exclude_farmer_id=farmer_id)
-        if member_count >= 2:
-            raise ValidationError("A household cannot have more than 2 members")
+        # Enforce constraints only for active rows
+        if is_active_row:
+            member_count = await self.repo.count_household_members(household_id=household_id, exclude_farmer_id=farmer_id)
+            if member_count >= 2:
+                raise ValidationError("A household cannot have more than 2 active members")
 
-        is_primary = farmer_number == 1
-        if is_primary:
-            existing_primary = await self.repo.count_primary_members(household_id=household_id, exclude_farmer_id=farmer_id)
-            if existing_primary >= 1:
-                raise ValidationError("A household cannot have more than one primary member")
+            if farmer_number == 1:
+                existing_primary = await self.repo.count_primary_members(household_id=household_id, exclude_farmer_id=farmer_id)
+                if existing_primary >= 1:
+                    raise ValidationError("A household cannot have more than one active primary member")
 
+        # Farmer updates (ensure farmer_group_id + household_id are correct for moves)
         farmer_updates = self._build_farmer_updates(row=row, header_idx=header_idx, from_sf=from_sf)
+
         farmer_updates["farmer_group_id"] = target_group_id
         if "household_id" in T("farmers").c:
             farmer_updates["household_id"] = household_id
         if "is_primary_household_member" in T("farmers").c:
-            farmer_updates["is_primary_household_member"] = is_primary
+            farmer_updates["is_primary_household_member"] = (farmer_number == 1)
 
-        farmer_composite = self._build_farmer_composite_id(ffg_id=ffg_id, hh_number=hh_number, farmer_number=farmer_number)
+        farmer_comp = build_farmer_composite(ffg_id, hh_number, farmer_number)
         self._set_if_present(
             farmer_updates,
             T("farmers"),
             ["composite_id", "farmer_composite_id", "participant_composite_id"],
-            farmer_composite,
+            farmer_comp,
         )
 
-        household_updates = self._build_household_updates(
-            target_group_id=target_group_id,
-            ffg_id=ffg_id,
-            hh_number=hh_number,
-            row=row,
-            header_idx=header_idx,
-        )
-        if household_updates:
-            await self.repo.update_household(household_id=household_id, values=household_updates)
+        computed_farmer_tns = build_tns_id(ffg_id, hh_number, farmer_number)
+        if "tns_id" in T("farmers").c:
+            farmer_updates["tns_id"] = computed_farmer_tns
 
         if farmer_updates:
             if "updated_at" in T("farmers").c:
@@ -792,6 +920,7 @@ class FarmersService:
                 farmer_updates["send_to_commcare_status"] = "Pending"
             await self.repo.update_farmer(farmer_id=farmer_id, values=farmer_updates)
 
+        # Attendance columns (unchanged)
         for index, module_key in module_cols:
             if index >= len(row):
                 continue
@@ -814,7 +943,7 @@ class FarmersService:
                         upload_run_id=run.id,
                         row_number=row_number,
                         farmer_id=farmer_id,
-                        tns_id=tns_id,
+                        tns_id=str(self._cell(row, header_idx, "tns_id") or ""),
                         error_type="attendance_error",
                         error_message=f"No training session found for module {module_key}",
                         raw_row={headers[i]: row[i] for i in range(min(len(headers), len(row)))},
@@ -828,11 +957,13 @@ class FarmersService:
                 if "attended" in T("attendances").c
                 else ({"status": "Present" if attended else "Absent"} if "status" in T("attendances").c else {})
             )
+
             attendance_id = await self.repo.attendance_id(
                 project_id=run.project_id,
                 farmer_id=farmer_id,
                 session_id=session_id,
             )
+
             await self.repo.upsert_attendance(
                 project_id=run.project_id,
                 farmer_id=farmer_id,
@@ -847,7 +978,6 @@ class FarmersService:
         updates: dict = {}
 
         editable_columns = [
-            "tns_id",
             "first_name",
             "middle_name",
             "last_name",
@@ -868,7 +998,7 @@ class FarmersService:
                 continue
             if column == "age":
                 value = int(value)
-            if column == 'phone_number':
+            if column == "phone_number":
                 value = str(value).strip()
             elif column == "create_in_commcare":
                 value = str(value).strip().lower() in ("1", "true", "yes")
@@ -890,7 +1020,9 @@ class FarmersService:
         header_idx: dict[str, int],
     ) -> dict:
         household = T("households")
-        values = {}
+        values: dict = {}
+
+        # Always set farmer_group_id on create (supports group moves)
         if "farmer_group_id" in household.c:
             values["farmer_group_id"] = target_group_id
         if "project_id" in household.c:
@@ -898,15 +1030,29 @@ class FarmersService:
         if "household_number" in household.c:
             values["household_number"] = hh_number
 
+        # Audit fields on create (if columns exist)
+        # Use the logged-in user id from the upload run.
+        if run.uploaded_by_id:
+            if "created_by_id" in household.c:
+                values["created_by_id"] = run.uploaded_by_id
+            if "last_updated_by_id" in household.c:
+                values["last_updated_by_id"] = run.uploaded_by_id
+
+        # Required household_name + household tns_id (recomputed deterministically)
+        if "household_name" in household.c:
+            values["household_name"] = build_household_name(hh_number)
+        if "tns_id" in household.c:
+            values["tns_id"] = build_household_tns_id(ffg_id, hh_number)
+
+        # Composite IDs (padded household number)
         self._set_if_present(
             values,
             household,
             ["composite_id", "household_composite_id", "composite_household_id"],
-            self._build_household_composite_id(ffg_id=ffg_id, hh_number=hh_number),
+            build_household_composite(ffg_id, hh_number),
         )
 
-        updates = self._household_shared_metrics(row=row, header_idx=header_idx)
-        values.update(updates)
+        values.update(self._household_shared_metrics(row=row, header_idx=header_idx))
         return values
 
     def _build_household_updates(
@@ -917,19 +1063,31 @@ class FarmersService:
         hh_number: int,
         row,
         header_idx: dict[str, int],
+        last_updated_by_id: UUID | None = None,
     ) -> dict:
         household = T("households")
-        values = {}
+        values: dict = {}
+
+        # Always set farmer_group_id on update too (supports group moves)
         if "farmer_group_id" in household.c:
             values["farmer_group_id"] = target_group_id
         if "household_number" in household.c:
             values["household_number"] = hh_number
 
+        # Keep audit field in sync on update (if present)
+        if last_updated_by_id and "last_updated_by_id" in household.c:
+            values["last_updated_by_id"] = last_updated_by_id
+
+        if "household_name" in household.c:
+            values["household_name"] = build_household_name(hh_number)
+        if "tns_id" in household.c:
+            values["tns_id"] = build_household_tns_id(ffg_id, hh_number)
+
         self._set_if_present(
             values,
             household,
             ["composite_id", "household_composite_id", "composite_household_id"],
-            self._build_household_composite_id(ffg_id=ffg_id, hh_number=hh_number),
+            build_household_composite(ffg_id, hh_number),
         )
 
         values.update(self._household_shared_metrics(row=row, header_idx=header_idx))
@@ -937,7 +1095,7 @@ class FarmersService:
 
     def _household_shared_metrics(self, *, row, header_idx: dict[str, int]) -> dict:
         household = T("households")
-        values = {}
+        values: dict = {}
 
         coffee_trees = self._cell(row, header_idx, "coffee_tree_numbers")
         if coffee_trees not in (None, "") and "number_of_trees" in household.c:
@@ -952,15 +1110,8 @@ class FarmersService:
 
         if values and "updated_at" in household.c:
             values["updated_at"] = datetime.utcnow()
+
         return values
-
-    @staticmethod
-    def _build_household_composite_id(*, ffg_id: str, hh_number: int) -> str:
-        return f"{ffg_id}-{hh_number}"
-
-    @staticmethod
-    def _build_farmer_composite_id(*, ffg_id: str, hh_number: int, farmer_number: int) -> str:
-        return f"{ffg_id}-{hh_number}-{farmer_number}"
 
     @staticmethod
     def _set_if_present(target: dict, table_obj, candidate_columns: list[str], value):

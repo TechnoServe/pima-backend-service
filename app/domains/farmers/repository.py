@@ -395,67 +395,63 @@ class FarmersRepository:
             out[(sfid, key)] = 1 if (cur == 1 or to_bool(r)) else 0
 
         return out
+    
 
-    # ---------------- Upload processing helpers ----------------
+    @staticmethod
+    def is_uuid(value) -> bool:
+        if isinstance(value, uuid.UUID):
+            return True
+        if not isinstance(value, str):
+            return False
+        try:
+            uuid.UUID(value)
+            return True
+        except (ValueError, TypeError):
+            return False
+
     async def resolve_farmer_for_project(
         self,
         *,
-        project_id: UUID,
+        project_id,
         identifier: str,
         from_sf: bool | None,
         active_only: bool = False,
-    ) -> tuple[UUID, UUID] | None:
+    ) -> tuple[uuid.UUID, uuid.UUID] | None:
         Farmer = T("farmers")
         FarmerGroup = T("farmer_groups")
 
-        def _query(match_col):
-            conditions = [
-                match_col == identifier,
-                FarmerGroup.c.project_id == project_id,
-                Farmer.c.is_deleted.is_(False),
-            ]
+        if not identifier:
+            return None
 
-            if "status" in Farmer.c:
-                conditions.append(
-                    Farmer.c.status == "Active"
-                )
-
-            return (
-                select(Farmer.c.id, Farmer.c.farmer_group_id)
-                .select_from(Farmer)
-                .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
-                .where(*conditions)
-                .limit(1)
-            )
-
-        if from_sf is True and "sf_id" in Farmer.c:
-            query_order = [Farmer.c.sf_id, Farmer.c.id]
-        elif from_sf is False:
-            query_order = [Farmer.c.id] + ([Farmer.c.sf_id] if "sf_id" in Farmer.c else [])
+        if self.is_uuid(identifier):
+            match_col = Farmer.c.id
+            match_val = uuid.UUID(str(identifier))
         else:
-            query_order = ([Farmer.c.sf_id] if "sf_id" in Farmer.c else []) + [Farmer.c.id]
+            if "sf_id" not in Farmer.c:
+                return None
+            match_col = Farmer.c.sf_id
+            match_val = identifier
 
-        for match_col in query_order:
-            row = (await self.db.execute(_query(match_col))).first()
-            if row:
-                return row[0], row[1]
-        return None
-    async def resolve_household_id(self, *, identifier: str, from_sf: bool | None) -> UUID | None:
-        Household = T("households")
-        order = []
-        if from_sf is True and "sf_id" in Household.c:
-            order = [Household.c.sf_id, Household.c.id]
-        elif from_sf is False:
-            order = [Household.c.id] + ([Household.c.sf_id] if "sf_id" in Household.c else [])
-        else:
-            order = ([Household.c.sf_id] if "sf_id" in Household.c else []) + [Household.c.id]
+        conditions = [
+            match_col == match_val,
+            FarmerGroup.c.project_id == project_id,
+            Farmer.c.is_deleted.is_(False),
+        ]
+        if active_only and "status" in Farmer.c:
+            conditions.append(Farmer.c.status == "Active")
 
-        for col_match in order:
-            q = select(Household.c.id).where(col_match == identifier).limit(1)
-            val = (await self.db.execute(q)).scalar_one_or_none()
-            if val:
-                return val
-        return None
+        q = (
+            select(Farmer.c.id, Farmer.c.farmer_group_id)
+            .select_from(Farmer)
+            .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
+            .where(*conditions)
+            .limit(1)
+        )
+
+        row = (await self.db.execute(q)).first()
+        if not row:
+            return None
+        return row[0], row[1]
 
     async def latest_session_id_for_group_module(self, *, farmer_group_id: UUID, module_id: UUID) -> UUID | None:
         TrainingSession = T("training_sessions")
@@ -525,10 +521,22 @@ class FarmersRepository:
         )
         return (await self.db.execute(q)).scalar_one_or_none()
 
-    async def create_household(self, *, values: dict) -> UUID:
+    
+    async def create_household(self, values: dict):
         Household = T("households")
-        stmt = insert(Household).values(**values).returning(Household.c.id)
-        return (await self.db.execute(stmt)).scalar_one()
+
+        if not values.get("id"):
+            values["id"] = uuid.uuid4()
+
+
+        stmt = (
+            insert(Household)
+            .values(**values)
+            .returning(Household.c.id)
+        )
+        res = await self.db.execute(stmt)
+        household_id = res.scalar_one()
+        return household_id
 
 
 

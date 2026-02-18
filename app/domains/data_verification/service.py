@@ -41,7 +41,7 @@ def _extract_commcare_image_id(image_url: str | None) -> str | None:
 
 
 def _commcare_proxy_url(commcare_image_id: str) -> str:
-    return f"{settings.api_prefix}/data-verification/training-sessions/image/{commcare_image_id}.jpg"
+    return f"{settings.base_url}{settings.api_prefix}/data-verification/training-sessions/image/{commcare_image_id}.jpg"
 
 
 class DataVerificationService:

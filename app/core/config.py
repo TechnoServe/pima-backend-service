@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     app_name: str = "MyPIMA API"
     environment: str = Field(default="dev")
     api_prefix: str = "/api/v1"
+    base_url: str = Field(default="http://localhost:8000", alias="BASE_URL")
 
     database_url: str = Field(alias="DATABASE_URL")
     db_schema: str = Field(default="pima", alias="DB_SCHEMA")

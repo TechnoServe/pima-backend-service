@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import io
 from datetime import date, datetime
 from typing import Optional
@@ -191,8 +190,8 @@ class DataVerificationService:
 
 
     async def fetch_commcare_image(self, *, commcare_image_id: str, project_id: UUID | None = None) -> tuple[bytes, str]:
-        if not settings.commcare_username or not settings.commcare_password:
-            raise ValidationError("CommCare credentials are not configured")
+        if not settings.commcare_api_key:
+            raise ValidationError("CommCare API key is not configured")
 
         image = await self.repo.get_image_by_commcare_image_id(commcare_image_id=commcare_image_id, project_id=project_id)
         if not image:
@@ -208,10 +207,8 @@ class DataVerificationService:
             if not image_host or image_host != allowed_host:
                 raise ValidationError("Image URL does not match configured CommCare host")
 
-        auth = base64.b64encode(f"{settings.commcare_username}:{settings.commcare_password}".encode("utf-8")).decode("ascii")
-
         def _download() -> tuple[bytes, str]:
-            req = Request(image_url, headers={"Authorization": f"Basic {auth}"})
+            req = Request(image_url, headers={"Authorization": f"ApiKey {settings.commcare_api_key}"})
             with urlopen(req, timeout=30) as response:
                 content_type = response.headers.get("Content-Type", "image/jpeg")
                 return response.read(), content_type

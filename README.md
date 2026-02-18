@@ -75,7 +75,7 @@ Copy `.env.example` to `.env` and update values.
 - `DB_SCHEMA` (defaults to `pima`)
 - `CORS_ORIGINS`
 - `COMMCARE_BASE_URL` (optional; recommended for image proxy host validation)
-- `COMMCARE_USERNAME` / `COMMCARE_PASSWORD` (required for CommCare image proxy)
+- `COMMCARE_API_KEY` (required for CommCare image proxy)
 
 Example:
 
@@ -250,4 +250,4 @@ For sampled training sessions, image URLs can be returned as backend proxy URLs:
 
 - `GET /api/v1/data-verification/training-sessions/image/{commcare_image_id}.jpg`
 
-The backend resolves the stored CommCare attachment URL and fetches the image using `COMMCARE_USERNAME` and `COMMCARE_PASSWORD`.
+The backend resolves the stored CommCare attachment URL and fetches the image using `Authorization: ApiKey <COMMCARE_API_KEY>`.

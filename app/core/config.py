@@ -18,8 +18,7 @@ class Settings(BaseSettings):
     gcp_project_id: str
     gcs_bucket_name: str
 
-    commcare_username: str | None = Field(default=None, alias="COMMCARE_USERNAME")
-    commcare_password: str | None = Field(default=None, alias="COMMCARE_PASSWORD")
+    commcare_api_key: str | None = Field(default=None, alias="COMMCARE_API_KEY")
     commcare_base_url: str | None = Field(default=None, alias="COMMCARE_BASE_URL")
 
 settings = Settings()

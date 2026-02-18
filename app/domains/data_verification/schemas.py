@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 ReviewStatus = Literal["not_reviewed", "reviewed", "all"]
 VerdictFilter = Literal["correct", "incorrect", "unclear", "all"]
-VerdictValue = Literal["correct", "incorrect", "unclear"]
+VerdictValue = Literal["correct", "incorrect", "unclear", "", "unverified"]
 
 
 class DataVerificationImage(BaseModel):

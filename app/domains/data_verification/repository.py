@@ -47,37 +47,6 @@ class DataVerificationRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    def _selected_image_id_expr(self, training_sessions, images):
-        image_id_col = maybe_col(training_sessions, "image_id")
-        if image_id_col is not None:
-            return image_id_col
-
-        order_col = maybe_col(images, "created_at", "updated_at")
-        order_expr = order_col.desc() if order_col is not None else images.c.id.desc()
-
-        if "training_session_id" in images.c:
-            return (
-                select(images.c.id)
-                .where(images.c.training_session_id == training_sessions.c.id)
-                .order_by(order_expr, images.c.id.desc())
-                .limit(1)
-                .scalar_subquery()
-            )
-
-        if "entity_id" in images.c:
-            predicates = [images.c.entity_id == training_sessions.c.id]
-            if "entity_type" in images.c:
-                predicates.append(images.c.entity_type.in_(["training_session", "training_sessions"]))
-            return (
-                select(images.c.id)
-                .where(and_(*predicates))
-                .order_by(order_expr, images.c.id.desc())
-                .limit(1)
-                .scalar_subquery()
-            )
-
-        return literal(None)
-
     def _base_rows_query(self, project_id: UUID):
         training_sessions = T("training_sessions")
         training_modules = T("training_modules")
@@ -88,12 +57,10 @@ class DataVerificationRepository:
 
         module_name_col = col(training_modules, "module_name", "name", "title")
         trainer_name_col = name_expr(trainer_alias)
-        training_date_col = maybe_col(training_sessions, "training_date", "session_date", "date")
-        image_url_col = maybe_col(images, "url", "image_url", "public_url")
-        image_verdict_col = maybe_col(images, "verdict", "review_verdict")
+        training_date_col = maybe_col(training_sessions, "date_session_1")
+        image_url_col = maybe_col(images, "image_url")
+        image_verdict_col = maybe_col(images, "verification_status", "review_verdict")
         image_object_name_col = maybe_col(images, "gcs_object_name", "object_name")
-
-        selected_image_id = self._selected_image_id_expr(training_sessions, images)
 
         query = (
             select(
@@ -109,30 +76,24 @@ class DataVerificationRepository:
                 if maybe_col(training_sessions, "trainer_id") is not None
                 else literal(None).label("trainer_id"),
                 trainer_name_col.label("trainer_name"),
-                training_date_col.label("training_date") if training_date_col is not None else literal(None).label("training_date"),
+                training_date_col.label("training_date"),
                 maybe_col(training_sessions, "sampled").label("sampled")
                 if maybe_col(training_sessions, "sampled") is not None
                 else literal(False).label("sampled"),
                 maybe_col(training_sessions, "review_status").label("review_status")
                 if maybe_col(training_sessions, "review_status") is not None
                 else literal("not_reviewed").label("review_status"),
-                maybe_col(training_sessions, "total_attendance").label("total_attendance")
-                if maybe_col(training_sessions, "total_attendance") is not None
-                else literal(None).label("total_attendance"),
-                maybe_col(training_sessions, "male_attendance").label("male_attendance")
-                if maybe_col(training_sessions, "male_attendance") is not None
-                else literal(None).label("male_attendance"),
-                maybe_col(training_sessions, "female_attendance").label("female_attendance")
-                if maybe_col(training_sessions, "female_attendance") is not None
-                else literal(None).label("female_attendance"),
+                maybe_col(training_sessions, "total_attendees_session_1").label("total_attendance"),
+                maybe_col(training_sessions, "male_attendees_session_1").label("male_attendance"),
+                maybe_col(training_sessions, "female_attendees_session_1").label("female_attendance"),
                 images.c.id.label("image_id"),
-                image_url_col.label("image_url") if image_url_col is not None else literal(None).label("image_url"),
+                image_url_col.label("image_url"),
                 image_verdict_col.label("image_verdict") if image_verdict_col is not None else literal(None).label("image_verdict"),
                 image_object_name_col.label("image_object_name") if image_object_name_col is not None else literal(None).label("image_object_name"),
             )
             .select_from(training_sessions)
             .join(training_modules, training_sessions.c.module_id == training_modules.c.id)
-            .outerjoin(images, images.c.id == selected_image_id)
+            .outerjoin(images, images.c.image_reference_id == training_sessions.c.id)
         )
 
         trainer_id_col = maybe_col(training_sessions, "trainer_id")
@@ -156,7 +117,45 @@ class DataVerificationRepository:
 
     async def list_training_sessions(self, *, project_id: UUID, page: int, page_size: int, review_status: str, verdict: str, date_from: Optional[date], date_to: Optional[date], trainer_id: Optional[UUID]) -> tuple[list[dict], int]:
         base = self._base_rows_query(project_id).subquery()
-        filtered = select(base).where(base.c.sampled.is_(True))
+        filtered = select(base).where(base.c.sampled.is_(True)).where(base.c.trainer_id != None)
+        
+        print(review_status, verdict, trainer_id, date_from, date_to)
+        
+        print("incoming:", repr(review_status), type(review_status))
+        
+        vals = await self.db.execute(
+            select(base.c.review_status, func.count())
+            .where(base.c.sampled.is_(True))
+            .where(base.c.trainer_id != None)
+            .group_by(base.c.review_status)
+            .order_by(func.count().desc())
+        )
+        print(vals.all())
+        
+        total_sampled = (await self.db.execute(
+            select(func.count()).select_from(base).where(base.c.sampled.is_(True))
+        )).scalar_one()
+
+        total_with_status = (await self.db.execute(
+            select(func.count()).select_from(base)
+            .where(base.c.sampled.is_(True))
+            .where(base.c.review_status == review_status)
+        )).scalar_one()
+
+        total_null_status = (await self.db.execute(
+            select(func.count()).select_from(base)
+            .where(base.c.sampled.is_(True))
+            .where(base.c.review_status.is_(None))
+        )).scalar_one()
+
+        print("sampled total:", total_sampled)
+        print("status match:", total_with_status)
+        print("status NULL:", total_null_status)
+        
+        print(filtered.where(base.c.review_status == review_status)
+        .compile(compile_kwargs={"literal_binds": True}))
+        
+        print("-----------------------------------------------------------------")
 
         if review_status != "all":
             filtered = filtered.where(base.c.review_status == review_status)
@@ -168,6 +167,9 @@ class DataVerificationRepository:
             filtered = filtered.where(base.c.training_date >= date_from)
         if date_to:
             filtered = filtered.where(base.c.training_date <= date_to)
+            
+        print("-----------------------------------------------------------------")
+        print(f"Constructed SQL query for listing training sessions: {filtered}")
 
         total = (await self.db.execute(select(func.count()).select_from(filtered.subquery()))).scalar_one() or 0
         paged = filtered.order_by(base.c.training_date.desc().nullslast(), base.c.id.desc()).offset((page - 1) * page_size).limit(page_size)

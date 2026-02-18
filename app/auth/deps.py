@@ -79,7 +79,5 @@ async def require_project_access(
     row = res.first()
     if not row:
         raise Unauthorized("No access to this project")
-    print("Project access role:", current_user)
-    print("Project access status:", row)
     # ensure_project_access(current_user.get("user_role"), row[0].status)
     return current_user

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from datetime import date
+from logging import log
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -55,6 +56,9 @@ async def list_training_sessions(
 ):
     await _maybe_await(require_project_access(db, user, project_id))
     service = DataVerificationService(db)
+    
+    
+    print(f"Listing training sessions for project {project_id} with filters - page: {page}, page_size: {page_size}, review_status: {review_status}, verdict: {verdict}, date_from: {date_from}, date_to: {date_to}, trainer_id: {trainer_id}")
     return await _service_call(
         service.list_training_sessions(
             project_id=project_id,

@@ -45,7 +45,7 @@ def signed_get_url(object_name: str, expires_seconds: int = 3600) -> str | None:
             method="GET",
         )
     except (AttributeError, ValueError, TypeError):
-        console.log("cannot sign url")
+        print("cannot sign url")
         return None
 
 

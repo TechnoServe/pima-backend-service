@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import inspect
 from datetime import date
-from logging import log
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user, require_project_access
@@ -104,6 +103,24 @@ async def submit_training_session_review(
             project_id=project_id,
         )
     )
+
+
+@router.get("/image/{commcare_image_name}")
+async def fetch_training_session_image(
+    commcare_image_name: str,
+    project_id: UUID | None = Query(default=None),
+    db: AsyncSession = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    if project_id is not None:
+        await _maybe_await(require_project_access(db, user, project_id))
+
+    service = DataVerificationService(db)
+    commcare_image_id = commcare_image_name.rsplit(".", 1)[0]
+    payload, content_type = await _service_call(
+        service.fetch_commcare_image(commcare_image_id=commcare_image_id, project_id=project_id)
+    )
+    return Response(content=payload, media_type=content_type)
 
 
 @router.get("/export")

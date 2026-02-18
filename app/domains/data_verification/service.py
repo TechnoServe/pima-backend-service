@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import io
 from datetime import date, datetime
 from typing import Optional
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from uuid import UUID
 
 from openpyxl import Workbook
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.gcs import signed_get_url
 from app.shared.api_errors import NotFoundError, ValidationError
 from .repository import DataVerificationRepository
@@ -22,6 +27,22 @@ from .schemas import (
 ALLOWED_REVIEW_STATUS = {"not_reviewed", "reviewed", "all"}
 ALLOWED_VERDICT_FILTER = {"correct", "incorrect", "unclear", "all"}
 ALLOWED_VERDICT_VALUE = {"correct", "incorrect", "unclear"}
+
+
+def _extract_commcare_image_id(image_url: str | None) -> str | None:
+    if not image_url:
+        return None
+
+    path = urlparse(image_url).path or ""
+    filename = path.rsplit("/", 1)[-1]
+    if not filename:
+        return None
+
+    return filename.rsplit(".", 1)[0]
+
+
+def _commcare_proxy_url(commcare_image_id: str) -> str:
+    return f"{settings.api_prefix}/data-verification/training-sessions/image/{commcare_image_id}.jpg"
 
 
 class DataVerificationService:
@@ -52,8 +73,14 @@ class DataVerificationService:
         if image_id is None:
             return None
 
-        url = row.get("image_url")
-        if not url:
+        image_url = row.get("image_url")
+        url = None
+        commcare_image_id = _extract_commcare_image_id(image_url)
+        if commcare_image_id:
+            url = _commcare_proxy_url(commcare_image_id)
+        elif image_url:
+            url = image_url
+        else:
             object_name = row.get("image_object_name")
             if object_name:
                 url = signed_get_url(object_name) or None
@@ -161,6 +188,38 @@ class DataVerificationService:
             review_status="reviewed",
             image=DataVerificationImage(id=image["id"], verdict=verdict_value, url=image.get("url")),
         )
+
+
+    async def fetch_commcare_image(self, *, commcare_image_id: str, project_id: UUID | None = None) -> tuple[bytes, str]:
+        if not settings.commcare_username or not settings.commcare_password:
+            raise ValidationError("CommCare credentials are not configured")
+
+        image = await self.repo.get_image_by_commcare_image_id(commcare_image_id=commcare_image_id, project_id=project_id)
+        if not image:
+            raise NotFoundError("Image not found")
+
+        image_url = image.get("image_url")
+        if not image_url:
+            raise NotFoundError("Image URL not found")
+
+        if settings.commcare_base_url:
+            image_host = (urlparse(image_url).hostname or "").lower()
+            allowed_host = (urlparse(settings.commcare_base_url).hostname or "").lower()
+            if not image_host or image_host != allowed_host:
+                raise ValidationError("Image URL does not match configured CommCare host")
+
+        auth = base64.b64encode(f"{settings.commcare_username}:{settings.commcare_password}".encode("utf-8")).decode("ascii")
+
+        def _download() -> tuple[bytes, str]:
+            req = Request(image_url, headers={"Authorization": f"Basic {auth}"})
+            with urlopen(req, timeout=30) as response:
+                content_type = response.headers.get("Content-Type", "image/jpeg")
+                return response.read(), content_type
+
+        try:
+            return await asyncio.to_thread(_download)
+        except Exception as exc:
+            raise ValidationError("Unable to fetch image from CommCare") from exc
 
     async def export_training_sessions_excel(
         self,

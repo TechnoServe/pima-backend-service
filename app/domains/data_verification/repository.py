@@ -259,6 +259,33 @@ class DataVerificationRepository:
 
         return None
 
+    async def get_image_by_commcare_image_id(self, *, commcare_image_id: str, project_id: Optional[UUID] = None) -> Optional[dict]:
+        images = T("images")
+        training_sessions = T("training_sessions")
+        image_url_col = maybe_col(images, "image_url")
+        if image_url_col is None:
+            return None
+
+        stmt = (
+            select(images)
+            .join(training_sessions, images.c.image_reference_id == training_sessions.c.id)
+            .where(image_url_col.is_not(None))
+            .where(image_url_col.ilike(f"%/{commcare_image_id}%"))
+            .order_by(images.c.id.desc())
+            .limit(1)
+        )
+
+        if project_id is not None:
+            if "project_id" in training_sessions.c:
+                stmt = stmt.where(training_sessions.c.project_id == project_id)
+            else:
+                farmer_groups = T("farmer_groups")
+                stmt = stmt.join(farmer_groups, training_sessions.c.farmer_group_id == farmer_groups.c.id)
+                stmt = stmt.where(farmer_groups.c.project_id == project_id)
+
+        row = (await self.db.execute(stmt)).mappings().first()
+        return dict(row) if row else None
+
     async def get_training_session_project_id(self, training_session_id: UUID) -> Optional[UUID]:
         training_sessions = T("training_sessions")
         if "project_id" in training_sessions.c:

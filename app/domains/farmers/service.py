@@ -181,7 +181,8 @@ class FarmersService:
 
     async def summary(self, *, project_id: UUID) -> FarmersSummaryResponse:
         s = await self.repo.summary(project_id=project_id)
-        return FarmersSummaryResponse(total=s["total"], pending_commcare=s["pending_commcare"])
+        print(s)
+        return FarmersSummaryResponse(total=1, pending_commcare=s["pending_commcare"])
 
     async def filter_options(self, *, project_id: UUID) -> FarmersFilterOptions:
         FarmerGroup = T("farmer_groups")

@@ -68,6 +68,10 @@ async def require_project_access(
     project_id: str | None = None,
 ):
     from app.auth.rbac import ensure_project_access
+    
+    if is_admin(current_user.get("user_role")):
+        return current_user  # means unrestricted
+    
     if project_id is None:
         return current_user
     psr = get_table("project_staff_roles")

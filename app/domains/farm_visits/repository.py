@@ -39,29 +39,38 @@ class FarmVisitFilters:
 
 
 class FarmVisitsRepository:
-    SORT_ALLOWLIST = {"date_visited", "training_group_name", "farmer_full_name", "farmer_tns_id", "visiting_staff_name"}
+    SORT_ALLOWLIST = {
+        "date_visited",
+        "training_group_name",
+        "farmer_full_name",
+        "farmer_tns_id",
+        "visiting_staff_name",
+    }
 
     def __init__(self, db: AsyncSession):
         self.db = db
         self.fv = T("farm_visits")
-        self.ts = T("training_sessions")
         self.fg = T("farmer_groups")
         self.farmers = T("farmers")
         self.users = T("users")
+        self.households = T("households")
 
     def _columns_and_from(self):
-        fv_training_session_id = maybe_col(self.fv, "training_session_id")
-        ts_farmer_group_id = maybe_col(self.ts, "farmer_group_id")
-        fv_farmer_id = maybe_col(self.fv, "farmer_id")
-        fv_visiting_staff_id = maybe_col(self.fv, "visiting_staff_id", "staff_id", "user_id")
-        ts_trainer_id = maybe_col(self.ts, "trainer_id", "staff_id")
+        hh_farmer_group_id = maybe_col(self.households, "farmer_group_id")
 
-        from_expr = self.fv.join(self.ts, fv_training_session_id == self.ts.c.id).join(self.fg, ts_farmer_group_id == self.fg.c.id)
-        from_expr = from_expr.outerjoin(self.farmers, fv_farmer_id == self.farmers.c.id) if fv_farmer_id is not None else from_expr
+        fv_primary_farmer_id = maybe_col(self.fv, "visited_primary_farmer_id", "farmer_id")
+        fv_visiting_staff_id = maybe_col(self.fv, "visiting_staff_id", "staff_id", "user_id")
+
+        from_expr = (
+            self.fv.outerjoin(self.households, self.fv.c.visited_household_id == self.households.c.id)
+            .outerjoin(self.fg, hh_farmer_group_id == self.fg.c.id)
+        )
+
+        if fv_primary_farmer_id is not None:
+            from_expr = from_expr.outerjoin(self.farmers, fv_primary_farmer_id == self.farmers.c.id)
+
         if fv_visiting_staff_id is not None:
             from_expr = from_expr.outerjoin(self.users, fv_visiting_staff_id == self.users.c.id)
-        elif ts_trainer_id is not None:
-            from_expr = from_expr.outerjoin(self.users, ts_trainer_id == self.users.c.id)
 
         date_col = maybe_col(self.fv, "date_visited", "visit_date", "created_at")
         group_name = maybe_col(self.fg, "name", "farmer_group_name")
@@ -86,80 +95,163 @@ class FarmVisitsRepository:
             "farmer_full_name": farmer_name,
             "farmer_gender": maybe_col(self.farmers, "gender"),
             "visiting_staff_name": staff_name,
+            "group_project_id": maybe_col(self.fg, "project_id"),
+            "primary_farmer_id": fv_primary_farmer_id,
         }
         return from_expr, cols
 
     def _apply_filters(self, stmt, filters: FarmVisitFilters, cols: dict):
-        stmt = stmt.where(self.fg.c.project_id == filters.project_id)
+        if cols.get("group_project_id") is not None:
+            pass 
+            #stmt = stmt.where(cols["group_project_id"] == filters.project_id)
+
         if filters.date_from and cols["date_visited"] is not None:
             stmt = stmt.where(func.date(cols["date_visited"]) >= filters.date_from)
+
         if filters.date_to and cols["date_visited"] is not None:
             stmt = stmt.where(func.date(cols["date_visited"]) <= filters.date_to)
+
         if filters.farm_visit_type and cols["farm_visit_type"] is not None:
             stmt = stmt.where(cols["farm_visit_type"] == filters.farm_visit_type)
+
         if filters.search:
             q = f"%{filters.search.strip()}%"
-            predicates = [cols["farmer_full_name"].ilike(q), cols["visiting_staff_name"].ilike(q)]
+            predicates = []
+
+            if cols["farmer_full_name"] is not None:
+                predicates.append(cols["farmer_full_name"].ilike(q))
+            if cols["visiting_staff_name"] is not None:
+                predicates.append(cols["visiting_staff_name"].ilike(q))
             if cols["farmer_tns_id"] is not None:
                 predicates.append(cols["farmer_tns_id"].ilike(q))
             if cols["training_group_name"] is not None:
                 predicates.append(cols["training_group_name"].ilike(q))
-            stmt = stmt.where(or_(*predicates))
+
+            if predicates:
+                stmt = stmt.where(or_(*predicates))
+
         return stmt
 
-    async def list(self, *, filters: FarmVisitFilters, page: int, page_size: int, sort_by: str, sort_dir: str):
+    def _select_label(self, col):
+        return col.label(col.key) if hasattr(col, "key") else col
+
+    async def list(
+        self,
+        *,
+        filters: FarmVisitFilters,
+        page: int,
+        page_size: int,
+        sort_by: str,
+        sort_dir: str,
+    ):
         from_expr, cols = self._columns_and_from()
+
         select_cols = [
             cols["id"].label("id"),
-            cols["date_visited"].label("date_visited") if cols["date_visited"] is not None else literal(None).label("date_visited"),
-            cols["farm_visit_type"].label("farm_visit_type") if cols["farm_visit_type"] is not None else literal(None).label("farm_visit_type"),
-            cols["visit_comments"].label("visit_comments") if cols["visit_comments"] is not None else literal(None).label("visit_comments"),
-            cols["location_gps_latitude"].label("location_gps_latitude") if cols["location_gps_latitude"] is not None else literal(None).label("location_gps_latitude"),
-            cols["location_gps_longitude"].label("location_gps_longitude") if cols["location_gps_longitude"] is not None else literal(None).label("location_gps_longitude"),
-            cols["location_gps_altitude"].label("location_gps_altitude") if cols["location_gps_altitude"] is not None else literal(None).label("location_gps_altitude"),
-            cols["number_of_cuerdas"].label("number_of_cuerdas") if cols["number_of_cuerdas"] is not None else literal(None).label("number_of_cuerdas"),
-            cols["number_of_separate_coffee_fields"].label("number_of_separate_coffee_fields") if cols["number_of_separate_coffee_fields"] is not None else literal(None).label("number_of_separate_coffee_fields"),
-            cols["field_age"].label("field_age") if cols["field_age"] is not None else literal(None).label("field_age"),
-            cols["field_size"].label("field_size") if cols["field_size"] is not None else literal(None).label("field_size"),
-            cols["training_group_name"].label("training_group_name") if cols["training_group_name"] is not None else literal(None).label("training_group_name"),
-            cols["farmer_tns_id"].label("farmer_tns_id") if cols["farmer_tns_id"] is not None else literal(None).label("farmer_tns_id"),
+            (cols["date_visited"] if cols["date_visited"] is not None else literal(None)).label("date_visited"),
+            (cols["farm_visit_type"] if cols["farm_visit_type"] is not None else literal(None)).label("farm_visit_type"),
+            (cols["visit_comments"] if cols["visit_comments"] is not None else literal(None)).label("visit_comments"),
+            (cols["location_gps_latitude"] if cols["location_gps_latitude"] is not None else literal(None)).label(
+                "location_gps_latitude"
+            ),
+            (cols["location_gps_longitude"] if cols["location_gps_longitude"] is not None else literal(None)).label(
+                "location_gps_longitude"
+            ),
+            (cols["location_gps_altitude"] if cols["location_gps_altitude"] is not None else literal(None)).label(
+                "location_gps_altitude"
+            ),
+            (cols["number_of_cuerdas"] if cols["number_of_cuerdas"] is not None else literal(None)).label(
+                "number_of_cuerdas"
+            ),
+            (cols["number_of_separate_coffee_fields"] if cols["number_of_separate_coffee_fields"] is not None else literal(None)).label(
+                "number_of_separate_coffee_fields"
+            ),
+            (cols["field_age"] if cols["field_age"] is not None else literal(None)).label("field_age"),
+            (cols["field_size"] if cols["field_size"] is not None else literal(None)).label("field_size"),
+            (cols["training_group_name"] if cols["training_group_name"] is not None else literal(None)).label(
+                "training_group_name"
+            ),
+            (cols["farmer_tns_id"] if cols["farmer_tns_id"] is not None else literal(None)).label("farmer_tns_id"),
             cols["farmer_full_name"].label("farmer_full_name"),
-            cols["farmer_gender"].label("farmer_gender") if cols["farmer_gender"] is not None else literal(None).label("farmer_gender"),
+            (cols["farmer_gender"] if cols["farmer_gender"] is not None else literal(None)).label("farmer_gender"),
             cols["visiting_staff_name"].label("visiting_staff_name"),
         ]
+
         stmt = select(*select_cols).select_from(from_expr)
         stmt = self._apply_filters(stmt, filters, cols)
 
-        total = int((await self.db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one())
+        total_stmt = select(func.count()).select_from(stmt.subquery())
+        total = int((await self.db.execute(total_stmt)).scalar_one())
 
         requested = sort_by if sort_by in self.SORT_ALLOWLIST else "date_visited"
-        sort_col = cols.get(requested) or cols["date_visited"] or self.fv.c.id
+        sort_col = cols.get(requested)
+
+        if sort_col is None:
+            sort_col = cols["date_visited"] if cols["date_visited"] is not None else self.fv.c.id
+
         order_expr = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
-        stmt = stmt.order_by(order_expr, self.fv.c.id.desc()).offset((page - 1) * page_size).limit(page_size)
+
+        stmt = (
+            stmt.order_by(order_expr, self.fv.c.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
 
         rows = (await self.db.execute(stmt)).mappings().all()
         return [dict(r) for r in rows], total
 
     async def stats(self, *, filters: FarmVisitFilters):
         from_expr, cols = self._columns_and_from()
-        base = self._apply_filters(select(self.fv.c.id.label("id"), cols["date_visited"].label("date_visited") if cols["date_visited"] is not None else literal(None).label("date_visited"), maybe_col(self.fv, "farmer_id").label("farmer_id") if maybe_col(self.fv, "farmer_id") is not None else literal(None).label("farmer_id"), self.fg.c.id.label("group_id")).select_from(from_expr), filters, cols).subquery()
+
+        base_cols = [
+            self.fv.c.id.label("id"),
+            (cols["date_visited"] if cols["date_visited"] is not None else literal(None)).label("date_visited"),
+            (cols["primary_farmer_id"] if cols["primary_farmer_id"] is not None else literal(None)).label("farmer_id"),
+            self.fg.c.id.label("group_id"),
+        ]
+
+        base_stmt = select(*base_cols).select_from(from_expr)
+        base_stmt = self._apply_filters(base_stmt, filters, cols)
+        base = base_stmt.subquery()
 
         total = int((await self.db.execute(select(func.count()).select_from(base))).scalar_one())
 
-        this_month = 0
-        if "date_visited" in base.c:
-            month_start = datetime.now().date().replace(day=1)
-            this_month = int((await self.db.execute(select(func.count()).select_from(base).where(func.date(base.c.date_visited) >= month_start))).scalar_one())
+        month_start = datetime.now().date().replace(day=1)
+        this_month = int(
+            (await self.db.execute(
+                select(func.count())
+                .select_from(base)
+                .where(base.c.date_visited.is_not(None))
+                .where(func.date(base.c.date_visited) >= month_start)
+            )).scalar_one()
+        )
 
-        unique_farmers = int((await self.db.execute(select(func.count(func.distinct(base.c.farmer_id))).select_from(base).where(base.c.farmer_id.is_not(None)))).scalar_one())
-        unique_training_groups = int((await self.db.execute(select(func.count(func.distinct(base.c.group_id))).select_from(base))).scalar_one())
+        unique_farmers = int(
+            (await self.db.execute(
+                select(func.count(func.distinct(base.c.farmer_id)))
+                .select_from(base)
+                .where(base.c.farmer_id.is_not(None))
+            )).scalar_one()
+        )
 
-        return {"total": total, "this_month": this_month, "unique_farmers": unique_farmers, "unique_training_groups": unique_training_groups}
+        unique_training_groups = int(
+            (await self.db.execute(
+                select(func.count(func.distinct(base.c.group_id))).select_from(base)
+            )).scalar_one()
+        )
+
+        return {
+            "total": total,
+            "this_month": this_month,
+            "unique_farmers": unique_farmers,
+            "unique_training_groups": unique_training_groups,
+        }
 
     async def filter_types(self, *, filters: FarmVisitFilters):
         from_expr, cols = self._columns_and_from()
         if cols["farm_visit_type"] is None:
             return []
+
         stmt = select(func.distinct(cols["farm_visit_type"]).label("farm_visit_type")).select_from(from_expr)
         stmt = self._apply_filters(stmt, filters, cols).order_by(cols["farm_visit_type"].asc())
         rows = (await self.db.execute(stmt)).all()

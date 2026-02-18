@@ -85,7 +85,7 @@ class ObservationsRepository:
 
     def _apply_filters(self, stmt, filters: DemoPlotObservationFilters, cols):
         stmt = stmt.where(self.fg.c.project_id == filters.project_id)
-        default_types = ["DemoPlot", "TrainingObservation"]
+        default_types = ["Demo Plot", "Training"]
         if filters.observation_type and cols["observation_type"] is not None:
             stmt = stmt.where(cols["observation_type"] == filters.observation_type)
         elif cols["observation_type"] is not None:
@@ -126,7 +126,8 @@ class ObservationsRepository:
         total = int((await self.db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one())
 
         key = sort_by if sort_by in self.SORT_ALLOWLIST else "observation_date"
-        sort_col = cols.get(key) or cols["observation_date"] or self.obs.c.id
+        # sort_col = cols.get(key) or cols["observation_date"] or self.obs.c.id
+        sort_col = cols["observation_date"]
         order_expr = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
         stmt = stmt.order_by(order_expr, self.obs.c.id.desc()).offset((page - 1) * page_size).limit(page_size)
 

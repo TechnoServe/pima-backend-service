@@ -7,10 +7,10 @@ ALL_ROLES = {
     "Project Manager",
     "Senior MEL Specialist",
     "MEL Specialist",
-    "Business Advisor",
     "Agronomy Advisor",
     "Senior Agronomy Advisor",
     "Senior Business Advisor",
+    "Business Advisor",
     "Farmer Trainer",
     "Super Admin",
 }

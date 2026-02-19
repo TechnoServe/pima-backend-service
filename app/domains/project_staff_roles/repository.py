@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
+import uuid
 
 from sqlalchemy import desc, distinct, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,7 +73,7 @@ class ProjectStaffRolesRepository:
         row = (await self.db.execute(stmt)).mappings().first()
         return dict(row) if row else None
 
-    async def create_role(self, *, user_id: UUID, project_id: UUID, role: str) -> dict[str, Any]:
+    async def create_role(self, *, user_id: UUID, project_id: UUID, role: str, current_user: dict | None = None) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         role_col = maybe_col(self.psr, "role", "staff_role")
         data = {
@@ -85,6 +86,14 @@ class ProjectStaffRolesRepository:
             data["created_at"] = now
         if "updated_at" in self.psr.c:
             data["updated_at"] = now
+            
+        shared_id = uuid.uuid4()
+        
+        data["id"] = shared_id
+        data['commcare_case_id'] = str(shared_id) # to string
+        data['created_by_id'] = current_user.get('id')
+        data['last_updated_by_id'] = current_user.get('id')
+        
         stmt = self.psr.insert().values(**data).returning(self.psr)
         row = (await self.db.execute(stmt)).mappings().one()
         await self.db.commit()

@@ -46,6 +46,7 @@ class UsersService:
 
     async def get_user(self, user_id: UUID) -> dict:
         user = await self.repo.get_user(user_id)
+        user['role'] = user.get('user_role')  # add role field for backward compatibility
         if not user:
             raise NotFoundError("User not found")
         return user

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
+import uuid
 
 from sqlalchemy import and_, asc, case, desc, distinct, exists, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,8 +52,8 @@ class UsersRepository:
                 filters.append(or_(*predicates))
         if status and "status" in self.users.c:
             filters.append(self.users.c.status == status)
-        if role and "role" in self.users.c:
-            filters.append(self.users.c.role == role)
+        if role and "user_role" in self.users.c:
+            filters.append(self.users.c.user_role == role)
         return filters
 
     def _project_filter_exists(self, project_id: UUID):
@@ -147,7 +148,7 @@ class UsersRepository:
                     "last_name": obj.get("last_name"),
                     "email": obj.get("email"),
                     "phone_number": obj.get("phone_number"),
-                    "role": obj.get("role"),
+                    "role": obj.get("user_role"),
                     "status": obj.get("status"),
                     "active_project_roles_count": int(r.get("active_project_roles_count") or 0),
                     "active_projects": active_projects_map.get(obj.get("id"), []),
@@ -221,6 +222,18 @@ class UsersRepository:
     async def create_user(self, payload: dict[str, Any]) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         data = dict(payload)
+        
+        data["user_role"] = data.get("role")
+        data["id"] = uuid.uuid4()
+        data["password"] = 'MP@1234'
+        
+        data['tns_id'] = str(uuid.uuid4()).upper().replace('-', '')[:7]
+        
+        
+        # remove role if user_role is set, to avoid confusion
+        if "user_role" in data and "role" in data:
+            del data["role"]
+            
         if "created_at" in self.users.c and "created_at" not in data:
             data["created_at"] = now
         if "updated_at" in self.users.c:
@@ -240,7 +253,7 @@ class UsersRepository:
         return dict(row) if row else None
 
     async def distinct_roles(self) -> list[str]:
-        if "role" not in self.users.c:
+        if "user_role" not in self.users.c:
             return []
-        stmt = select(distinct(self.users.c.role)).where(self.users.c.role.is_not(None)).order_by(self.users.c.role)
+        stmt = select(distinct(self.users.c.user_role)).where(self.users.c.user_role.is_not(None)).order_by(self.users.c.user_role)
         return [r[0] for r in (await self.db.execute(stmt)).all() if r[0]]

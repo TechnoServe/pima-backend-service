@@ -11,10 +11,11 @@ from .schemas import ProjectStaffRoleCreate
 
 
 class ProjectStaffRolesService:
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, current_user: dict | None = None):
         self.repo = ProjectStaffRolesRepository(db)
         if self.repo.user_col is None:
             raise ValidationError("project_staff_roles table is missing user reference column")
+        self.current_user = current_user
 
     async def list_roles(self, *, user_id: UUID, status: str) -> dict:
         if status not in {"Active", "Inactive", "All"}:
@@ -54,6 +55,7 @@ class ProjectStaffRolesService:
                 user_id=payload.user_id,
                 project_id=payload.project_id,
                 role=payload.role,
+                current_user=self.current_user,
             )
 
         return {

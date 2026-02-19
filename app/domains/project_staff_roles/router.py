@@ -54,7 +54,7 @@ async def create_project_staff_role(
     db: AsyncSession = Depends(get_session),
     _user=Depends(get_current_user),
 ):
-    return await _service_call(ProjectStaffRolesService(db).create_role(payload))
+    return await _service_call(ProjectStaffRolesService(db, _user).create_role(payload))
 
 
 @router.patch("/{role_id}/deactivate", response_model=ProjectStaffRoleItem)
@@ -63,7 +63,7 @@ async def deactivate_project_staff_role(
     db: AsyncSession = Depends(get_session),
     _user=Depends(get_current_user),
 ):
-    return await _service_call(ProjectStaffRolesService(db).deactivate_role(role_id))
+    return await _service_call(ProjectStaffRolesService(db, _user).deactivate_role(role_id))
 
 
 @router.get("/filters", response_model=ProjectStaffRoleFiltersResponse)

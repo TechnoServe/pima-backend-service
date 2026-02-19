@@ -247,6 +247,12 @@ class UsersRepository:
         data = dict(payload)
         if "updated_at" in self.users.c:
             data["updated_at"] = datetime.now(timezone.utc)
+            
+        data["user_role"] = data.get("role")
+        
+        if "user_role" in data and "role" in data:
+            del data["role"]
+        
         stmt = self.users.update().where(self.users.c.id == user_id).values(**data).returning(self.users)
         row = (await self.db.execute(stmt)).mappings().first()
         await self.db.commit()

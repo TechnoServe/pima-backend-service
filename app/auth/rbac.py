@@ -15,7 +15,7 @@ ALL_ROLES = {
     "Super Admin",
 }
 
-ADMIN_ROLES = {"Super Admin"}
+ADMIN_ROLES = {"Super Admin", "Superadmin"}
 WRITE_ROLES = {
     "Super Admin",
     "CI Leadership",

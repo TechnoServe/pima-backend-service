@@ -226,6 +226,7 @@ class FarmersService:
             "gender",
             "age",
             "coffee_tree_numbers",
+            "number_of_coffee_plots",
             "phone_number",
             "coop_membership_number",
             "location",
@@ -252,9 +253,12 @@ class FarmersService:
             module_headers.append(f"{module_number}-{module_name}-{module_key}")
 
         farmer_sf_ids = [str(r.get("farmer_sf_id") or "").strip() for r in base_rows if r.get("farmer_sf_id")]
+        farmer_ids = [uuid for r in base_rows for uuid in (r.get("farmer_id"),) if r.get("farmer_id")]
+        
         att_map = await self.repo.export_attendance_map(
             project_id=project_id,
             farmer_sf_ids=farmer_sf_ids,
+            farmer_ids=farmer_ids,
             training_modules=modules,
         )
 
@@ -293,7 +297,7 @@ class FarmersService:
             ]
 
             module_vals = []
-            sfid = str(r.get("farmer_sf_id") or "").strip()
+            sfid = str(r.get("farmer_sf_id") or r.get("farmer_id") or "").strip()
             for m in modules:
                 key = str(m.get("sf_id") or m.get("id"))
                 module_vals.append(att_map.get((sfid, key), 0))
@@ -992,11 +996,15 @@ class FarmersService:
         ]
 
         for column in editable_columns:
+            
             if column not in farmer_table.c:
                 continue
             value = self._cell(row, header_idx, column)
-            if value in (None, ""):
-                continue
+            # if column == 'middle_name':
+            #     print(f"Checking for middle_name column: {'middle_name' in farmer_table.c}")
+            #     print(f"Columns in farmer table: {farmer_table.c.keys()}")
+            #     print(f"Row value for {column}: {value}")
+            
             if column == "age":
                 value = int(value)
             if column == "phone_number":

@@ -131,16 +131,16 @@ class FarmersRepository:
             "full_name": (Farmer.c.last_name, Farmer.c.first_name)
             if ("last_name" in Farmer.c and "first_name" in Farmer.c)
             else (Farmer.c.id,),
-            "tns_id": (Farmer.c.tns_id,) if "tns_id" in Farmer.c else (Farmer.c.id,),
+            "tns_id": Farmer.c.tns_id,
             "updated_at": (Farmer.c.updated_at,) if "updated_at" in Farmer.c else (Farmer.c.id,),
             "created_at": (Farmer.c.created_at,) if "created_at" in Farmer.c else (Farmer.c.id,),
             "farmer_trainer_name": (ft_name_col,),
             "business_advisor_name": (ba_name_col,),
         }
-        cols = sort_map.get(sort_by, sort_map.get("updated_at", (Farmer.c.id,)))
+        cols = sort_map.get(sort_by, sort_map.get("tns_id", (Farmer.c.id,)))
         order_fn = desc if (sort_order or "").lower() == "desc" else asc
         for c in cols:
-            q = q.order_by(order_fn(c))
+            q = q.order_by(Farmer.c.tns_id)
 
         total = (await self.db.execute(select(func.count()).select_from(q.subquery()))).scalar_one() or 0
         q = q.offset((page - 1) * page_size).limit(page_size)
@@ -230,7 +230,7 @@ class FarmersRepository:
         farmer_sf_col = col(Farmer, "sf_id")
         farmer_tns_col = col(Farmer, "tns_id")
         first_col = col(Farmer, "first_name")
-        mid_col = Farmer.c.middle_name if "middle_name" in Farmer.c else literal(None)
+        mid_col = Farmer.c.middle_name
         last_col = col(Farmer, "last_name")
         gender_col = Farmer.c.gender if "gender" in Farmer.c else literal(None)
         age_col = Farmer.c.age if "age" in Farmer.c else literal(None)
@@ -324,16 +324,18 @@ class FarmersRepository:
         *,
         project_id: UUID,
         farmer_sf_ids: List[str],
+        farmer_ids: List[uuid.UUID],
         training_modules: List[dict],
     ) -> Dict[tuple[str, str], int]:
         Attendance = T("attendances")
         Farmer = T("farmers")
         TrainingSession = T("training_sessions")
 
-        if not farmer_sf_ids or not training_modules:
+        if not farmer_sf_ids or not farmer_ids or not training_modules:
             return {}
 
         farmer_sf_col = col(Farmer, "sf_id")
+        farmer_ids_col = col(Farmer, "id")
         att_farmer_id_col = col(Attendance, "farmer_id")
         att_session_id_col = col(Attendance, "training_session_id")
 
@@ -344,19 +346,25 @@ class FarmersRepository:
         status_col_exists = "status" in Attendance.c
 
         module_ids = [m["id"] for m in training_modules]
+        
+
+        from sqlalchemy import or_
 
         q = (
             select(
                 farmer_sf_col.label("farmer_sf_id"),
+                farmer_ids_col.label("farmer_id"),
                 session_module_id_col.label("module_id"),
-                # (Attendance.c.attended if attended_col_exists else literal(None)).label("attended"),
                 (Attendance.c.status if status_col_exists else literal(None)).label("status"),
             )
             .select_from(Attendance)
             .join(Farmer, att_farmer_id_col == Farmer.c.id)
             .join(TrainingSession, att_session_id_col == TrainingSession.c.id)
             .where(
-                #Farmer.c.sf_id.in_(farmer_sf_ids),
+                or_(
+                    Farmer.c.sf_id.in_(farmer_sf_ids),
+                    Farmer.c.id.in_(farmer_ids),
+                ),
                 session_module_id_col.in_(module_ids),
             )
         )
@@ -386,7 +394,7 @@ class FarmersRepository:
 
         # if multiple sessions exist per module, treat any "present" as 1
         for r in rows:
-            sfid = str(r.get("farmer_sf_id") or "").strip()
+            sfid = str(r.get("farmer_sf_id") or r.get("farmer_id") or "").strip()
             mid = r.get("module_id")
             if not sfid or not mid:
                 continue

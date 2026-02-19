@@ -73,7 +73,7 @@ class FarmVisitsRepository:
             from_expr = from_expr.outerjoin(self.users, fv_visiting_staff_id == self.users.c.id)
 
         date_col = maybe_col(self.fv, "date_visited", "visit_date", "created_at")
-        group_name = maybe_col(self.fg, "name", "farmer_group_name")
+        group_name = maybe_col(self.fg, "name", "ffg_name")
         farmer_tns_id = maybe_col(self.farmers, "tns_id", "sf_id")
         farmer_name = full_name_expr(self.farmers)
         staff_name = full_name_expr(self.users)
@@ -101,9 +101,8 @@ class FarmVisitsRepository:
         return from_expr, cols
 
     def _apply_filters(self, stmt, filters: FarmVisitFilters, cols: dict):
-        if cols.get("group_project_id") is not None:
-            pass 
-            #stmt = stmt.where(cols["group_project_id"] == filters.project_id)
+        if cols.get("group_project_id") is not None: 
+            stmt = stmt.where(cols["group_project_id"] == filters.project_id)
 
         if filters.date_from and cols["date_visited"] is not None:
             stmt = stmt.where(func.date(cols["date_visited"]) >= filters.date_from)

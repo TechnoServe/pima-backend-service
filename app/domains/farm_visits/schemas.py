@@ -56,6 +56,6 @@ class FarmVisitsListParams(BaseModel):
     farm_visit_type: str | None = None
     search: str | None = None
     page: int = Field(default=1, ge=1)
-    page_size: int = Field(default=10, ge=1, le=200)
+    page_size: int = Field(default=10, ge=1, le=200000)
     sort_by: str = "date_visited"
     sort_dir: str = "desc"

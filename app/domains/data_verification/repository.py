@@ -59,7 +59,7 @@ class DataVerificationRepository:
         trainer_name_col = name_expr(trainer_alias)
         training_date_col = maybe_col(training_sessions, "date_session_1")
         image_url_col = maybe_col(images, "image_url")
-        image_verdict_col = maybe_col(images, "verification_status", "review_verdict")
+        image_verdict_col = maybe_col(images, "verdict")
         image_object_name_col = maybe_col(images, "gcs_object_name", "object_name")
 
         query = (
@@ -88,7 +88,7 @@ class DataVerificationRepository:
                 maybe_col(training_sessions, "female_attendees_session_1").label("female_attendance"),
                 images.c.id.label("image_id"),
                 image_url_col.label("image_url"),
-                image_verdict_col.label("image_verdict") if image_verdict_col is not None else literal(None).label("image_verdict"),
+                image_verdict_col.label("image_verdict"),
                 image_object_name_col.label("image_object_name") if image_object_name_col is not None else literal(None).label("image_object_name"),
             )
             .select_from(training_sessions)
@@ -118,10 +118,6 @@ class DataVerificationRepository:
     async def list_training_sessions(self, *, project_id: UUID, page: int, page_size: int, review_status: str, verdict: str, date_from: Optional[date], date_to: Optional[date], trainer_id: Optional[UUID]) -> tuple[list[dict], int]:
         base = self._base_rows_query(project_id).subquery()
         filtered = select(base).where(base.c.sampled.is_(True)).where(base.c.trainer_id != None)
-        
-        print(review_status, verdict, trainer_id, date_from, date_to)
-        
-        print("incoming:", repr(review_status), type(review_status))
         
         vals = await self.db.execute(
             select(base.c.review_status, func.count())
@@ -159,8 +155,8 @@ class DataVerificationRepository:
 
         if review_status != "all":
             filtered = filtered.where(base.c.review_status == review_status)
-        if verdict != "all":
-            filtered = filtered.where(base.c.image_verdict == verdict)
+        # if verdict != "all":
+        #     filtered = filtered.where(base.c.image_verdict == verdict)
         if trainer_id:
             filtered = filtered.where(base.c.trainer_id == trainer_id)
         if date_from:
@@ -224,7 +220,7 @@ class DataVerificationRepository:
         training_sessions = T("training_sessions")
         images = T("images")
 
-        image_id_col = maybe_col(training_sessions, "image_id")
+        image_id_col = maybe_col(training_sessions, "image_reference_id")
         if image_id_col is not None:
             session_image_id = (
                 await self.db.execute(select(image_id_col).where(training_sessions.c.id == training_session_id))
@@ -236,11 +232,11 @@ class DataVerificationRepository:
         order_col = maybe_col(images, "created_at", "updated_at")
         order_expr = order_col.desc() if order_col is not None else images.c.id.desc()
 
-        if "training_session_id" in images.c:
+        if "image_reference_id" in images.c:
             row = (
                 await self.db.execute(
                     select(images)
-                    .where(images.c.training_session_id == training_session_id)
+                    .where(images.c.image_reference_id == training_session_id)
                     .order_by(order_expr, images.c.id.desc())
                     .limit(1)
                 )
@@ -308,6 +304,7 @@ class DataVerificationRepository:
 
         await self.db.execute(update(training_sessions).where(training_sessions.c.id == training_session_id).values(review_status="reviewed"))
 
-        image_verdict_col = maybe_col(images, "verdict", "review_verdict")
+        image_verdict_col = maybe_col(images, "verdict")
         if image_verdict_col is not None:
-            await self.db.execute(update(images).where(images.c.id == image_id).values({image_verdict_col.name: verdict}))
+            await self.db.execute(update(images).where(images.c.id == image_id)
+                                  .values({image_verdict_col.name: verdict, images.c.verification_status: 'reviewed'}))

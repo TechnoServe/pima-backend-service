@@ -414,6 +414,10 @@ class FarmersService:
         return await self.repo.create_upload_run(run)
 
     async def _validate_or_queue_run(self, *, run: UploadRun, file_bytes: bytes) -> None:
+        run.status = "validating"
+        run.progress = 10
+        await self.db.commit()
+
         errors = await self._collect_validation_errors(run=run, file_bytes=file_bytes)
         if errors:
             await self._mark_validation_errored(run=run, errors=errors)
@@ -421,12 +425,13 @@ class FarmersService:
 
         wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
         ws = wb.active
-        run.status = "processing"
-        run.progress = 50  # CHANGED: validation completed = 50%, processing begins at 50%
+        run.status = "validating"
+        run.progress = 50
         run.total_rows = max((ws.max_row - 1 if ws.max_row else 0), 0)
+        run.success_count = 0
         run.failed_count = 0
         run.remaining_count = run.total_rows
-        run.meta = {**(run.meta or {}), "validated": True}
+        run.meta = {**(run.meta or {}), "validated": True, "queued_for_processing": True}
         await self.db.commit()
 
     # ---------------- NODE-STYLE VALIDATION ----------------
@@ -654,25 +659,16 @@ class FarmersService:
     # ---------------- Upload processing ----------------
     async def process_upload_run(self, *, upload_run_id: UUID, file_bytes: bytes | None = None) -> None:
         run = await self.repo.get_upload_run(upload_run_id)
-        if not run or run.status in {"completed", "failed", "cancelled", "validation_errored"}:
+        if not run or run.status != "processing":
             return
 
         group_id_by_ffg: dict[str, UUID] = {}
 
         try:
-            run.status = "validating"
-            run.progress = 0  # CHANGED: validation phase starts at 0 (0-50)
-            await self.db.commit()
-
             if file_bytes is None:
                 if not run.gcs_object_name:
                     raise ValidationError("Uploaded file location is missing")
                 file_bytes = download_bytes(run.gcs_object_name)
-
-            validation = self.validate_upload(file_bytes=file_bytes)
-            if not validation.is_valid:
-                await self._fail_run(run, message="Uploaded file failed validation", failed_rows=validation.total_rows)
-                return
 
             wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
             ws = wb.active
@@ -702,10 +698,10 @@ class FarmersService:
                     out_map=group_id_by_ffg,
                 )
 
-            run.total_rows = max((ws.max_row - 1 if ws.max_row else 0), 0)
+            run.total_rows = run.total_rows or max((ws.max_row - 1 if ws.max_row else 0), 0)
             run.remaining_count = run.total_rows
             run.status = "processing"
-            run.progress = 50  # CHANGED: validation completed = 50, processing starts at 50 (50-100)
+            run.progress = max(run.progress, 50)
             await self.db.commit()
 
             row_errors: list[UploadRowError] = []
@@ -748,7 +744,7 @@ class FarmersService:
                 # CHANGED: processing is 50% of the bar (50 -> 100)
                 run.progress = min(99, 50 + int((processed / max(run.total_rows, 1)) * 50))
                 if processed % 25 == 0:
-                    await self.db.flush()
+                    await self.db.commit()
 
             if row_errors:
                 await self.repo.bulk_add_row_errors(row_errors)
@@ -1151,6 +1147,10 @@ class FarmersService:
         if not run:
             raise NotFoundError("Upload not found")
 
+        latest = await self.repo.get_latest_upload_for_project(project_id=run.project_id)
+        is_latest = bool(latest and latest.id == run.id)
+        has_child = await self.repo.has_child_upload(upload_id=run.id)
+
         original_url = signed_get_url(run.gcs_object_name) if run.gcs_object_name else None
         error_url = signed_get_url(run.error_gcs_object_name) if run.error_gcs_object_name else None
 
@@ -1173,7 +1173,7 @@ class FarmersService:
             uploaded_by_name=None,
             uploaded_at=run.uploaded_at,
             completed_at=run.completed_at,
-            can_retry=run.failed_count > 0,
+            can_retry=is_latest and (run.status == "failed" or has_child),
             parent_upload_id=run.parent_upload_id,
             original_file_url=original_url,
             error_report_url=error_url,
@@ -1229,6 +1229,18 @@ class FarmersService:
         if not run.gcs_object_name:
             raise ValidationError("Original upload file is missing")
 
+        latest = await self.repo.get_latest_upload_for_project(project_id=run.project_id)
+        is_latest = bool(latest and latest.id == run.id)
+        has_child = await self.repo.has_child_upload(upload_id=run.id)
+        if not is_latest:
+            raise ConflictError("Only the most recent upload run in a project can be retried")
+        if run.status != "failed" and not has_child:
+            raise ConflictError("Retry is only allowed for failed runs or runs that have child reuploads")
+
+        active = await self.repo.get_active_upload(project_id=run.project_id)
+        if active:
+            raise ConflictError("Cannot retry while another run is in progress")
+
         retry = UploadRun(
             project_id=run.project_id,
             filename=run.filename,
@@ -1237,7 +1249,7 @@ class FarmersService:
             gcs_bucket=run.gcs_bucket,
             gcs_object_name=run.gcs_object_name,
             gcs_uri=run.gcs_uri,
-            status="uploading",
+            status="validating",
             progress=0,
             total_rows=0,
             success_count=0,
@@ -1246,10 +1258,31 @@ class FarmersService:
             uploaded_by_id=run.uploaded_by_id,
             parent_upload_id=run.id,
             uploaded_at=datetime.utcnow(),
-            meta={"retry_mode": mode},
+            meta={"retry_mode": mode, "validated": True, "queued_for_processing": True, "retry_of": str(run.id)},
         )
         retry = await self.repo.create_upload_run(retry)
         return await self.get_upload_job(retry.id)
+
+    async def queue_validated_runs_for_processing(self, *, limit: int = 5) -> int:
+        q = (
+            select(UploadRun)
+            .where(
+                UploadRun.status == "validating",
+                UploadRun.meta["queued_for_processing"].astext == "true",
+                UploadRun.meta["validated"].astext == "true",
+            )
+            .order_by(UploadRun.uploaded_at.asc())
+            .limit(limit)
+        )
+        runs = list((await self.db.execute(q)).scalars().all())
+
+        for run in runs:
+            run.status = "processing"
+            run.progress = 50
+
+        if runs:
+            await self.db.commit()
+        return len(runs)
 
     async def get_upload_original_file_bytes(self, upload_id: UUID) -> tuple[bytes, str, str]:
         run = await self.repo.get_upload_run(upload_id)

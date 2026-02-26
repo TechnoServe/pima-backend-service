@@ -652,6 +652,19 @@ class FarmersRepository:
     async def get_upload_run(self, upload_id: UUID) -> Optional[UploadRun]:
         return await self.db.get(UploadRun, upload_id)
 
+    async def get_latest_upload_for_project(self, *, project_id: UUID) -> Optional[UploadRun]:
+        q = (
+            select(UploadRun)
+            .where(UploadRun.project_id == project_id)
+            .order_by(desc(UploadRun.uploaded_at), desc(UploadRun.id))
+            .limit(1)
+        )
+        return (await self.db.execute(q)).scalars().first()
+
+    async def has_child_upload(self, *, upload_id: UUID) -> bool:
+        q = select(func.count()).select_from(UploadRun).where(UploadRun.parent_upload_id == upload_id)
+        return ((await self.db.execute(q)).scalar_one() or 0) > 0
+
     async def list_upload_history(self, *, project_id: UUID, page: int, page_size: int) -> Tuple[List[UploadRun], int]:
         q = select(UploadRun).where(UploadRun.project_id == project_id).order_by(desc(UploadRun.uploaded_at))
         total = (await self.db.execute(select(func.count()).select_from(q.subquery()))).scalar_one() or 0

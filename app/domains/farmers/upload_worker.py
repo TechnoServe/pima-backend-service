@@ -15,9 +15,12 @@ logger = logging.getLogger(__name__)
 async def run_uploads_once() -> int:
     processed = 0
     async with SessionLocal() as db:
+        svc = FarmersService(db)
+        await svc.queue_validated_runs_for_processing(limit=5)
+
         q = (
             select(UploadRun.id)
-            .where(UploadRun.status.in_(["uploading", "processing"]))
+            .where(UploadRun.status == "processing")
             .order_by(UploadRun.uploaded_at.asc())
             .limit(5)
         )

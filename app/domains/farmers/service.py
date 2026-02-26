@@ -181,7 +181,6 @@ class FarmersService:
 
     async def summary(self, *, project_id: UUID) -> FarmersSummaryResponse:
         s = await self.repo.summary(project_id=project_id)
-        print(s)
         return FarmersSummaryResponse(total=1, pending_commcare=s["pending_commcare"])
 
     async def filter_options(self, *, project_id: UUID) -> FarmersFilterOptions:
@@ -254,7 +253,7 @@ class FarmersService:
 
         farmer_sf_ids = [str(r.get("farmer_sf_id") or "").strip() for r in base_rows if r.get("farmer_sf_id")]
         farmer_ids = [uuid for r in base_rows for uuid in (r.get("farmer_id"),) if r.get("farmer_id")]
-        
+
         att_map = await self.repo.export_attendance_map(
             project_id=project_id,
             farmer_sf_ids=farmer_sf_ids,
@@ -300,7 +299,7 @@ class FarmersService:
             sfid = str(r.get("farmer_sf_id") or r.get("farmer_id") or "").strip()
             for m in modules:
                 key = str(m.get("sf_id") or m.get("id"))
-                module_vals.append(att_map.get((sfid, key), 0))
+                module_vals.append(att_map.get((sfid, key), ''))
             ws.append(row + module_vals)
 
         bio = io.BytesIO()
@@ -403,7 +402,7 @@ class FarmersService:
             gcs_object_name=gcs["object_name"],
             gcs_uri=gcs["gcs_uri"],
             status="validating",
-            progress=5,
+            progress=0,  # CHANGED: validation starts at 0 (validation is 0-50)
             total_rows=0,
             success_count=0,
             failed_count=0,
@@ -423,7 +422,7 @@ class FarmersService:
         wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
         ws = wb.active
         run.status = "processing"
-        run.progress = 10
+        run.progress = 50  # CHANGED: validation completed = 50%, processing begins at 50%
         run.total_rows = max((ws.max_row - 1 if ws.max_row else 0), 0)
         run.failed_count = 0
         run.remaining_count = run.total_rows
@@ -563,15 +562,17 @@ class FarmersService:
             groups.setdefault(key, []).append(r)
 
         for key, members in groups.items():
+
+            hh_number = pad2(key.hh_number)
             if len(members) > 2:
                 for m in members:
-                    add(m.row_number, "hh_number", f"Household {key.ffg_id}-{key.hh_number} has more than 2 active members")
+                    add(m.row_number, "hh_number", f"Household {key.ffg_id}{hh_number} has more than 2 active members")
                 continue
 
             primary_count = sum(1 for m in members if m.farmer_number == 1)
             if primary_count > 1:
                 for m in members:
-                    add(m.row_number, "farmer_number", f"Household {key.ffg_id}-{key.hh_number} has more than one active primary member")
+                    add(m.row_number, "farmer_number", f"Household {key.ffg_id}{hh_number} has more than one active primary member")
                 continue
 
             if len(members) == 2:
@@ -579,7 +580,7 @@ class FarmersService:
                 has_secondary = any(m.farmer_number == 2 for m in members)
                 if not (has_primary and has_secondary):
                     for m in members:
-                        add(m.row_number, "farmer_number", f"Household {key.ffg_id}-{key.hh_number} must have one primary (1) and one secondary (2) when 2 members are active")
+                        add(m.row_number, "farmer_number", f"Household {key.ffg_id}{hh_number} must have one primary (1) and one secondary (2) when 2 members are active")
                     continue
 
         return issues
@@ -660,7 +661,7 @@ class FarmersService:
 
         try:
             run.status = "validating"
-            run.progress = 5
+            run.progress = 0  # CHANGED: validation phase starts at 0 (0-50)
             await self.db.commit()
 
             if file_bytes is None:
@@ -704,7 +705,7 @@ class FarmersService:
             run.total_rows = max((ws.max_row - 1 if ws.max_row else 0), 0)
             run.remaining_count = run.total_rows
             run.status = "processing"
-            run.progress = 10
+            run.progress = 50  # CHANGED: validation completed = 50, processing starts at 50 (50-100)
             await self.db.commit()
 
             row_errors: list[UploadRowError] = []
@@ -744,7 +745,8 @@ class FarmersService:
                 run.success_count = success_count
                 run.failed_count = failed_count
                 run.remaining_count = max(run.total_rows - processed, 0)
-                run.progress = min(95, 10 + int((processed / max(run.total_rows, 1)) * 85))
+                # CHANGED: processing is 50% of the bar (50 -> 100)
+                run.progress = min(99, 50 + int((processed / max(run.total_rows, 1)) * 50))
                 if processed % 25 == 0:
                     await self.db.flush()
 
@@ -996,15 +998,11 @@ class FarmersService:
         ]
 
         for column in editable_columns:
-            
+
             if column not in farmer_table.c:
                 continue
             value = self._cell(row, header_idx, column)
-            # if column == 'middle_name':
-            #     print(f"Checking for middle_name column: {'middle_name' in farmer_table.c}")
-            #     print(f"Columns in farmer table: {farmer_table.c.keys()}")
-            #     print(f"Row value for {column}: {value}")
-            
+
             if column == "age":
                 value = int(value)
             if column == "phone_number":

@@ -320,68 +320,58 @@ class FarmersRepository:
 
     # ---------------- Export: attendance map via training_sessions -> training_modules ----------------
     async def export_attendance_map(
-        self,
-        *,
-        project_id: UUID,
-        farmer_sf_ids: List[str],
-        farmer_ids: List[uuid.UUID],
-        training_modules: List[dict],
-    ) -> Dict[tuple[str, str], int]:
+    self,
+    *,
+    project_id: UUID,
+    farmer_sf_ids: List[str],      # kept for signature compatibility, not used
+    farmer_ids: List[uuid.UUID],   # kept for signature compatibility, not used
+    training_modules: List[dict],
+) -> Dict[tuple[str, str], int]:
         Attendance = T("attendances")
         Farmer = T("farmers")
+        FarmerGroup = T("farmer_groups")
         TrainingSession = T("training_sessions")
 
-        if not farmer_sf_ids or not farmer_ids or not training_modules:
+        if not training_modules:
             return {}
 
         farmer_sf_col = col(Farmer, "sf_id")
-        farmer_ids_col = col(Farmer, "id")
+        farmer_id_col = col(Farmer, "id")
         att_farmer_id_col = col(Attendance, "farmer_id")
         att_session_id_col = col(Attendance, "training_session_id")
-
-        # training_sessions -> module id
         session_module_id_col = col(TrainingSession, "module_id")
 
-        attended_col_exists = "attended" in Attendance.c
         status_col_exists = "status" in Attendance.c
+        attended_col_exists = "attended" in Attendance.c
 
         module_ids = [m["id"] for m in training_modules]
-        
-
-        from sqlalchemy import or_
 
         q = (
             select(
                 farmer_sf_col.label("farmer_sf_id"),
-                farmer_ids_col.label("farmer_id"),
+                farmer_id_col.label("farmer_id"),
                 session_module_id_col.label("module_id"),
+                (Attendance.c.attended if attended_col_exists else literal(None)).label("attended"),
                 (Attendance.c.status if status_col_exists else literal(None)).label("status"),
             )
             .select_from(Attendance)
             .join(Farmer, att_farmer_id_col == Farmer.c.id)
+            .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
             .join(TrainingSession, att_session_id_col == TrainingSession.c.id)
             .where(
-                or_(
-                    Farmer.c.sf_id.in_(farmer_sf_ids),
-                    Farmer.c.id.in_(farmer_ids),
-                ),
+                FarmerGroup.c.project_id == project_id,
+                Farmer.c.is_deleted.is_(False),
                 session_module_id_col.in_(module_ids),
             )
         )
-        
 
+        # If attendances table has project_id, keep it consistent (optional but fine)
         if "project_id" in Attendance.c:
             q = q.where(Attendance.c.project_id == project_id)
 
         rows = (await self.db.execute(q)).mappings().all()
-        
-        print(f"Attendance rows: {len(rows)}")  # debug
 
-        # header key: prefer module.sf_id else module.id
-        module_key_by_id: Dict[UUID, str] = {}
-        for m in training_modules:
-            module_key_by_id[m["id"]] = str(m.get("sf_id") or m["id"])
-
+        module_key_by_id: Dict[UUID, str] = {m["id"]: str(m.get("sf_id") or m["id"]) for m in training_modules}
         out: Dict[tuple[str, str], int] = {}
 
         def to_bool(r) -> bool:
@@ -392,7 +382,6 @@ class FarmersRepository:
                 return s in ("present", "attended", "1", "true", "yes")
             return False
 
-        # if multiple sessions exist per module, treat any "present" as 1
         for r in rows:
             sfid = str(r.get("farmer_sf_id") or r.get("farmer_id") or "").strip()
             mid = r.get("module_id")
@@ -403,7 +392,6 @@ class FarmersRepository:
             out[(sfid, key)] = 1 if (cur == 1 or to_bool(r)) else 0
 
         return out
-    
 
     @staticmethod
     def is_uuid(value) -> bool:

@@ -135,7 +135,7 @@ async def get_my_projects(
         project_stmt = project_stmt.where(projects.c.id.in_(allowed))
 
     project_rows = (await session.execute(project_stmt)).all()
-    print(project_rows)
+
     response: list[ProjectSummaryRead] = []
     for project in project_rows:
         project_dict = dict(project._mapping) if hasattr(project, "_mapping") else project

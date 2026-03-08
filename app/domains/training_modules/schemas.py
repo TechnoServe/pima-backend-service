@@ -69,7 +69,7 @@ class CreateTrainingModuleRequest(BaseModel):
     sample_fv_aa_households: bool = False
     sample_fv_aa_households_status: str | None = None
     status: str | None = "Active"
-    current_previous: CurrentPreviousValue = None
+    current_previous: Literal["Current", "Previous", ""] | None = None
     module_date: date | None = None
 
 
@@ -80,13 +80,13 @@ class CreateTrainingModuleResponse(BaseModel):
 
 
 class ChangeCurrentPreviousRequest(BaseModel):
-    current_previous: CurrentPreviousValue = None
+    current_previous: Literal["Current", "Previous", ""] | None = None
 
 
 class ChangeCurrentPreviousResponse(BaseModel):
     success: bool
     module_id: UUID
-    current_previous: CurrentPreviousValue = None
+    current_previous: Literal["Current", "Previous", ""] | None = None
     message: str
 
 

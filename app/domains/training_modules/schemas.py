@@ -58,7 +58,7 @@ class TrainingModulesListResponse(BaseModel):
 
 class TrainingModuleDetailsResponse(BaseModel):
     module: TrainingModuleItem
-    sessions: list[TrainingSessionItem]
+    training_sessions: list[TrainingSessionItem]
 
 
 class CreateTrainingModuleRequest(BaseModel):

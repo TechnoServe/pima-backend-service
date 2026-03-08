@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +14,18 @@ from .schemas import CreateTrainingModuleRequest
 
 
 _ALLOWED_CURRENT_PREVIOUS = {"Current", "Previous"}
+
+
+
+
+@asynccontextmanager
+async def _transaction_scope(db: AsyncSession):
+    if db.in_transaction():
+        yield
+        return
+
+    async with db.begin():
+        yield
 
 
 class TrainingModulesService:
@@ -93,7 +106,7 @@ class TrainingModulesService:
 
         normalized_current_previous = self._normalize_current_previous(payload.current_previous)
 
-        async with self.db.begin():
+        async with _transaction_scope(self.db):
             user_id = UUID(str(current_user["id"]))
             if normalized_current_previous == "Current":
                 await self.repo.normalize_project_current_previous_for_current(
@@ -141,7 +154,7 @@ class TrainingModulesService:
         if not module:
             raise NotFoundError("Training module not found")
 
-        async with self.db.begin():
+        async with _transaction_scope(self.db):
             user_id = UUID(str(current_user["id"]))
             if normalized_current_previous == "Current":
                 await self.repo.normalize_project_current_previous_for_current(
@@ -172,7 +185,7 @@ class TrainingModulesService:
         if not project_id:
             raise ValidationError("Training module is missing project_id")
 
-        async with self.db.begin():
+        async with _transaction_scope(self.db):
             affected_sessions = await self.repo.mark_module_sessions_for_commcare(
                 module_id=module_id,
                 current_user_id=UUID(str(current_user["id"])),

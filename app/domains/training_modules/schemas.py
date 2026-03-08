@@ -58,10 +58,7 @@ class TrainingModulesListResponse(BaseModel):
 
 class TrainingModuleDetailsResponse(BaseModel):
     module: TrainingModuleItem
-    sessions: list[TrainingSessionItem]
-
-
-CurrentPreviousValue = Literal["Current", "Previous", ""] | None
+    training_sessions: list[TrainingSessionItem]
 
 
 class CreateTrainingModuleRequest(BaseModel):

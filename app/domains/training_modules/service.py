@@ -21,7 +21,15 @@ _ALLOWED_CURRENT_PREVIOUS = {"Current", "Previous"}
 @asynccontextmanager
 async def _transaction_scope(db: AsyncSession):
     if db.in_transaction():
-        yield
+        try:
+            yield
+        except Exception:
+            if db.in_transaction():
+                await db.rollback()
+            raise
+        else:
+            if db.in_transaction():
+                await db.commit()
         return
 
     async with db.begin():

@@ -92,7 +92,7 @@ class TrainingModulesService:
         sessions = await self.repo.get_module_sessions(module_id)
         return {
             "module": self._module_response_item(module_row),
-            "sessions": [self._session_response_item(r) for r in sessions],
+            "training_sessions": [self._session_response_item(r) for r in sessions],
         }
 
     async def create_training_module(self, *, payload: CreateTrainingModuleRequest, current_user: dict) -> dict:

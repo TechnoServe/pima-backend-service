@@ -158,7 +158,42 @@ class TrainingModulesRepository:
         result = await self.db.execute(stmt)
         return result.rowcount or 0
 
-    async def update_module_current_previous(self, module_id: UUID, current_previous: str, current_user_id: UUID) -> dict:
+
+    async def normalize_project_current_previous_for_current(
+        self,
+        *,
+        project_id: UUID,
+        current_user_id: UUID,
+        exclude_module_id: UUID | None = None,
+    ) -> None:
+        values = {}
+        if "current_previous" in self.training_modules.c:
+            values["current_previous"] = None
+        if "last_updated_by_id" in self.training_modules.c:
+            values["last_updated_by_id"] = current_user_id
+        if "updated_at" in self.training_modules.c:
+            values["updated_at"] = datetime.now(timezone.utc)
+
+        if values:
+            clear_previous_stmt = update(self.training_modules).where(
+                self.training_modules.c.project_id == project_id,
+                self.training_modules.c.current_previous == "Previous",
+            )
+            if exclude_module_id is not None:
+                clear_previous_stmt = clear_previous_stmt.where(self.training_modules.c.id != exclude_module_id)
+            await self.db.execute(clear_previous_stmt.values(**values))
+
+            set_previous_values = dict(values)
+            set_previous_values["current_previous"] = "Previous"
+            demote_current_stmt = update(self.training_modules).where(
+                self.training_modules.c.project_id == project_id,
+                self.training_modules.c.current_previous == "Current",
+            )
+            if exclude_module_id is not None:
+                demote_current_stmt = demote_current_stmt.where(self.training_modules.c.id != exclude_module_id)
+            await self.db.execute(demote_current_stmt.values(**set_previous_values))
+
+    async def update_module_current_previous(self, module_id: UUID, current_previous: str | None, current_user_id: UUID) -> dict:
         values = {"current_previous": current_previous}
         if "last_updated_by_id" in self.training_modules.c:
             values["last_updated_by_id"] = current_user_id

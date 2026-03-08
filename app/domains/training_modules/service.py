@@ -20,6 +20,20 @@ class TrainingModulesService:
         self.db = db
         self.repo = TrainingModulesRepository(db)
 
+    @staticmethod
+    def _normalize_current_previous(value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if normalized == "":
+            return None
+        if normalized not in _ALLOWED_CURRENT_PREVIOUS:
+            raise ValidationError(
+                "Invalid current_previous value",
+                details={"allowed": ["Current", "Previous", ""]},
+            )
+        return normalized
+
     async def list_training_modules(
         self,
         *,
@@ -31,11 +45,7 @@ class TrainingModulesService:
         current_previous: str | None,
         current_module: bool | None,
     ) -> dict:
-        if current_previous and current_previous not in _ALLOWED_CURRENT_PREVIOUS:
-            raise ValidationError(
-                "Invalid current_previous value",
-                details={"allowed": sorted(_ALLOWED_CURRENT_PREVIOUS)},
-            )
+        normalized_current_previous = self._normalize_current_previous(current_previous)
 
         rows, total = await self.repo.list_training_modules(
             project_id=project_id,
@@ -43,7 +53,7 @@ class TrainingModulesService:
             page_size=page_size,
             search=search,
             status=status,
-            current_previous=current_previous,
+            current_previous=normalized_current_previous,
             current_module=current_module,
         )
         items = [self._module_response_item(r) for r in rows]
@@ -81,8 +91,19 @@ class TrainingModulesService:
         if existing:
             raise ConflictError("Training module already exists for this project and module number")
 
+        normalized_current_previous = self._normalize_current_previous(payload.current_previous)
+
         async with self.db.begin():
-            module_data = self.repo.build_module_create_data(payload.model_dump(), UUID(str(current_user["id"])))
+            user_id = UUID(str(current_user["id"]))
+            if normalized_current_previous == "Current":
+                await self.repo.normalize_project_current_previous_for_current(
+                    project_id=payload.project_id,
+                    current_user_id=user_id,
+                )
+
+            payload_data = payload.model_dump()
+            payload_data["current_previous"] = normalized_current_previous
+            module_data = self.repo.build_module_create_data(payload_data, user_id)
             created_module = await self.repo.create_module(module_data)
 
             groups = await self.repo.list_project_farmer_groups(payload.project_id)
@@ -98,7 +119,7 @@ class TrainingModulesService:
                         module_id=created_module["id"],
                         farmer_group_id=group["id"],
                         trainer_id=group.get("responsible_staff_id"),
-                        current_user_id=UUID(str(current_user["id"])),
+                        current_user_id=user_id,
                     )
                 )
 
@@ -113,28 +134,32 @@ class TrainingModulesService:
             "message": "Training module created successfully.",
         }
 
-    async def change_current_previous(self, *, module_id: UUID, current_previous: str, current_user: dict) -> dict:
-        if current_previous not in _ALLOWED_CURRENT_PREVIOUS:
-            raise ValidationError(
-                "Invalid current_previous value",
-                details={"allowed": sorted(_ALLOWED_CURRENT_PREVIOUS)},
-            )
+    async def change_current_previous(self, *, module_id: UUID, current_previous: str | None, current_user: dict) -> dict:
+        normalized_current_previous = self._normalize_current_previous(current_previous)
 
         module = await self.repo.get_module_by_id(module_id)
         if not module:
             raise NotFoundError("Training module not found")
 
         async with self.db.begin():
+            user_id = UUID(str(current_user["id"]))
+            if normalized_current_previous == "Current":
+                await self.repo.normalize_project_current_previous_for_current(
+                    project_id=module["project_id"],
+                    current_user_id=user_id,
+                    exclude_module_id=module_id,
+                )
+
             await self.repo.update_module_current_previous(
                 module_id,
-                current_previous,
-                UUID(str(current_user["id"])),
+                normalized_current_previous,
+                user_id,
             )
 
         return {
             "success": True,
             "module_id": module_id,
-            "current_previous": current_previous,
+            "current_previous": normalized_current_previous,
             "message": "Training module current_previous updated successfully.",
         }
 
@@ -190,10 +215,23 @@ class TrainingModulesService:
             "id": row.get("id"),
             "module_id": row.get("module_id"),
             "farmer_group_id": row.get("farmer_group_id"),
+            "farmer_group_name": row.get("farmer_group_name"),
             "trainer_id": row.get("trainer_id"),
+            "trainer_name": row.get("trainer_name"),
             "commcare_case_id": row.get("commcare_case_id"),
+            "date_session_1": row.get("date_session_1"),
+            "date_session_2": row.get("date_session_2"),
+            "male_attendees_session_1": row.get("male_attendees_session_1"),
+            "female_attendees_session_1": row.get("female_attendees_session_1"),
+            "total_attendees_session_1": row.get("total_attendees_session_1"),
+            "male_attendees_session_2": row.get("male_attendees_session_2"),
+            "female_attendees_session_2": row.get("female_attendees_session_2"),
+            "total_attendees_session_2": row.get("total_attendees_session_2"),
+            "male_attendees_agg": row.get("male_attendees_agg"),
+            "female_attendees_agg": row.get("female_attendees_agg"),
+            "total_attendees_agg": row.get("total_attendees_agg"),
             "send_to_commcare": row.get("send_to_commcare"),
             "send_to_commcare_status": row.get("send_to_commcare_status"),
-            "farmer_group_name": row.get("farmer_group_name"),
-            "trainer_name": row.get("trainer_name"),
+            "sampled": row.get("sampled"),
+            "review_status": row.get("review_status"),
         }

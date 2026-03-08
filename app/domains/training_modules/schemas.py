@@ -27,12 +27,25 @@ class TrainingSessionItem(BaseModel):
     id: UUID
     module_id: UUID
     farmer_group_id: UUID
+    farmer_group_name: str | None = None
     trainer_id: UUID | None = None
+    trainer_name: str | None = None
     commcare_case_id: str | None = None
+    date_session_1: date | None = None
+    date_session_2: date | None = None
+    male_attendees_session_1: int | None = None
+    female_attendees_session_1: int | None = None
+    total_attendees_session_1: int | None = None
+    male_attendees_session_2: int | None = None
+    female_attendees_session_2: int | None = None
+    total_attendees_session_2: int | None = None
+    male_attendees_agg: int | None = None
+    female_attendees_agg: int | None = None
+    total_attendees_agg: int | None = None
     send_to_commcare: bool | None = None
     send_to_commcare_status: str | None = None
-    farmer_group_name: str | None = None
-    trainer_name: str | None = None
+    sampled: bool | None = None
+    review_status: str | None = None
 
 
 class TrainingModulesListResponse(BaseModel):
@@ -56,7 +69,7 @@ class CreateTrainingModuleRequest(BaseModel):
     sample_fv_aa_households: bool = False
     sample_fv_aa_households_status: str | None = None
     status: str | None = "Active"
-    current_previous: Literal["Current", "Previous"]
+    current_previous: CurrentPreviousValue = None
     module_date: date | None = None
 
 
@@ -67,13 +80,13 @@ class CreateTrainingModuleResponse(BaseModel):
 
 
 class ChangeCurrentPreviousRequest(BaseModel):
-    current_previous: Literal["Current", "Previous"]
+    current_previous: CurrentPreviousValue = None
 
 
 class ChangeCurrentPreviousResponse(BaseModel):
     success: bool
     module_id: UUID
-    current_previous: Literal["Current", "Previous"]
+    current_previous: CurrentPreviousValue = None
     message: str
 
 

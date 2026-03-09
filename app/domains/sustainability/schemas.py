@@ -1,22 +1,35 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any, Dict, Optional
+from typing import Optional
 from uuid import UUID
 
 from pydantic import BaseModel
 
 
-class WetmillsCreate(BaseModel):
-    data: Dict[str, Any]
+class SustainabilitySummaryOverviewResponse(BaseModel):
+    total_registered_wetmills: int
+    total_bas: int
 
 
-class WetmillsUpdate(BaseModel):
-    data: Dict[str, Any]
+class WetmillVisitsPerWeekItem(BaseModel):
+    label: str
+    week_start: date
+    week_end: date
+    visits_count: int
 
 
-class WetmillsRead(BaseModel):
-    data: Dict[str, Any]
+class WetmillVisitsPerWeekResponse(BaseModel):
+    items: list[WetmillVisitsPerWeekItem]
+
+
+class DistributionItem(BaseModel):
+    label: str
+    value: int
+
+
+class DistributionResponse(BaseModel):
+    items: list[DistributionItem]
 
 
 class WetmillListItem(BaseModel):

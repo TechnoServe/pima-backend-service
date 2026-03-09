@@ -23,6 +23,7 @@ from app.domains.project_staff_roles.router import router as project_staff_roles
 from app.domains.projects.router import router as projects_router
 from app.domains.training_modules.router import router as training_modules_router
 from app.domains.training_sessions.router import router as training_sessions_router
+from app.domains.sustainability.router import router as sustainability_router
 from app.domains.users.router import router as users_router
 from app.domains.users_temp.router import router as users_temp_router
 from app.domains.wetmills.router import router as wetmills_router
@@ -50,6 +51,7 @@ router.include_router(farmers_router)
 
 router.include_router(training_modules_router)
 router.include_router(training_sessions_router)
+router.include_router(sustainability_router)
 router.include_router(data_verification_router)
 router.include_router(attendances_router)
 

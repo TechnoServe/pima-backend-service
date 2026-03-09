@@ -11,6 +11,18 @@ from .schemas import PaginatedWetmillsResponse, WetmillsFilterOptionsResponse
 
 
 class WetmillsService:
+    ALLOWED_SURVEYS = [
+        "manager_needs_assessment",
+        "cpqi",
+        "employees",
+        "financials",
+        "infrastructure",
+        "kpis",
+        "wet_mill_training",
+        "waste_water_management",
+        "water_and_energy_use",
+    ]
+
     def __init__(self, db: AsyncSession):
         self.repo = WetmillsRepository(db)
 
@@ -104,6 +116,77 @@ class WetmillsService:
         ws.append(self._export_headers())
         for row in rows:
             ws.append(self._export_row(dict(row), has_ownership))
+
+        survey_rows = await self.repo.list_survey_data_for_export(
+            programme=programme,
+            country=country,
+            search=search,
+            exporting_status=exporting_status,
+            mill_status=mill_status,
+            allowed_surveys=self.ALLOWED_SURVEYS,
+        )
+
+        grouped: dict[str, list[dict]] = {survey: [] for survey in self.ALLOWED_SURVEYS}
+        for row in survey_rows:
+            survey_type = str(row.get("survey_type") or "")
+            if survey_type in grouped:
+                grouped[survey_type].append(dict(row))
+
+        for survey_type in self.ALLOWED_SURVEYS:
+            rows_for_sheet = grouped.get(survey_type, [])
+            sheet = wb.create_sheet(title=survey_type[:31])
+
+            question_names = sorted({str(r.get("question_name") or "").strip() for r in rows_for_sheet if str(r.get("question_name") or "").strip()})
+            headers = [
+                "Wetmill Name",
+                "Visit Date",
+                "Submitted By",
+                "Completed Date",
+                "General Feedback",
+                *question_names,
+            ]
+            sheet.append(headers)
+
+            base_map: dict[tuple[str, str, str, str, str], dict] = {}
+            for row in rows_for_sheet:
+                visit_date = row.get("visit_date")
+                completed_date = row.get("completed_date")
+                visit_date_str = visit_date.isoformat() if visit_date else ""
+                completed_date_str = completed_date.isoformat() if completed_date else ""
+                key = (
+                    str(row.get("wetmill_name") or ""),
+                    visit_date_str,
+                    str(row.get("submitted_by") or ""),
+                    completed_date_str,
+                    str(row.get("general_feedback") or ""),
+                )
+                if key not in base_map:
+                    payload = {
+                        "Wetmill Name": key[0],
+                        "Visit Date": key[1],
+                        "Submitted By": key[2],
+                        "Completed Date": key[3],
+                        "General Feedback": key[4],
+                    }
+                    for question in question_names:
+                        payload[question] = ""
+                    base_map[key] = payload
+
+                question_name = str(row.get("question_name") or "").strip()
+                if question_name:
+                    question_value = row.get("value_text")
+                    if question_value is None:
+                        question_value = row.get("value_number")
+                    if question_value is None:
+                        question_value = row.get("value_boolean")
+                    if question_value is None:
+                        question_value = row.get("value_date")
+                    if question_value is None:
+                        question_value = row.get("value_gps")
+                    base_map[key][question_name] = "" if question_value is None else str(question_value)
+
+            for row_data in base_map.values():
+                sheet.append([row_data.get(h, "") for h in headers])
 
         out = io.BytesIO()
         wb.save(out)

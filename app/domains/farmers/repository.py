@@ -288,12 +288,21 @@ class FarmersRepository:
 
         farm_visit_household_col = col(FarmVisits, "visited_household_id", "household_id")
 
+        visit_order_cols = []
+        if "created_at" in FarmVisits.c:
+            visit_order_cols.append(FarmVisits.c.created_at.desc().nullslast())
+        if "updated_at" in FarmVisits.c:
+            visit_order_cols.append(FarmVisits.c.updated_at.desc().nullslast())
+        visit_order_cols.append(FarmVisits.c.id.desc())
+
         latest_visit_sq = (
             select(
                 farm_visit_household_col.label("visited_household_id"),
-                func.max(FarmVisits.c.id).label("latest_visit_id"),
+                FarmVisits.c.id.label("latest_visit_id"),
+                func.row_number()
+                .over(partition_by=farm_visit_household_col, order_by=visit_order_cols)
+                .label("visit_rank"),
             )
-            .group_by(farm_visit_household_col)
             .subquery()
         )
 
@@ -342,7 +351,10 @@ class FarmersRepository:
             .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
             .join(Projects, FarmerGroup.c.project_id == Projects.c.id)
             .outerjoin(Household, Farmer.c.household_id == Household.c.id)
-            .outerjoin(latest_visit_sq, latest_visit_sq.c.visited_household_id == Household.c.id)
+            .outerjoin(
+                latest_visit_sq,
+                (latest_visit_sq.c.visited_household_id == Household.c.id) & (latest_visit_sq.c.visit_rank == 1),
+            )
             .outerjoin(LatestFarmVisit, LatestFarmVisit.c.id == latest_visit_sq.c.latest_visit_id)
             .outerjoin(Location, FarmerGroup.c.location_id == Location.c.id)
             .outerjoin(FT, fg_responsible_col == ft_id_col)

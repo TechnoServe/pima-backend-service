@@ -213,6 +213,12 @@ class FarmersService:
 
     # ---------------- Export XLSX ----------------
     async def export_excel(self, *, project_id: UUID) -> bytes:
+        project_location_name = await self.repo.project_location_name(project_id)
+        location_name = (project_location_name or "").strip().lower()
+
+        hide_coffee_plots = location_name in {"zimbabwe", "ethiopia"}
+        use_farm_size_alias = location_name == "ethiopia"
+
         modules = await self.repo.export_training_modules(project_id)
         base_rows = await self.repo.export_farmers_base_rows(project_id)
 
@@ -246,6 +252,9 @@ class FarmersService:
             "business_advisor",
             "create_in_commcare",
         ]
+
+        if not hide_coffee_plots:
+            base_headers.insert(9, "number_of_coffee_plots")
 
         module_headers: List[str] = []
         for m in modules:
@@ -300,6 +309,9 @@ class FarmersService:
                 r.get("business_advisor") or "",
                 bool(r.get("create_in_commcare")) if r.get("create_in_commcare") is not None else "",
             ]
+
+            if not hide_coffee_plots:
+                row.insert(9, r.get("number_of_coffee_plots") if r.get("number_of_coffee_plots") is not None else "")
 
             module_vals = []
             sfid = str(r.get("farmer_sf_id") or r.get("farmer_id") or "").strip()

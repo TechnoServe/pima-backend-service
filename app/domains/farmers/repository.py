@@ -173,7 +173,7 @@ class FarmersRepository:
         q = (
             select(
                 func.count().label("total"),
-                func.sum(case((Farmer.c.send_to_commcare.is_(True), 1), else_=0)).label("pending_commcare"),
+                func.coalesce(func.sum(case((Farmer.c.send_to_commcare.is_(True), 1), else_=0)), 0).label("pending_commcare"),
             )
             .select_from(Farmer)
             .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
@@ -182,6 +182,24 @@ class FarmersRepository:
 
         res = await self.db.execute(q)
         return res.mappings().first() or {"total": 0, "pending_commcare": 0}
+
+    async def project_location_name(self, project_id: UUID) -> str | None:
+        Projects = T("projects")
+        Locations = T("locations")
+
+        if "location_id" not in Projects.c:
+            return None
+
+        loc_name_col = col(Locations, "location_name", "name", "title")
+        q = (
+            select(loc_name_col)
+            .select_from(Projects)
+            .outerjoin(Locations, Projects.c.location_id == Locations.c.id)
+            .where(Projects.c.id == project_id)
+            .limit(1)
+        )
+        return (await self.db.execute(q)).scalar_one_or_none()
+
     # ---------------- Export: training modules ----------------
     async def export_training_modules(self, project_id: UUID) -> List[dict]:
         TrainingModule = T("training_modules")
@@ -220,6 +238,7 @@ class FarmersRepository:
         Location = T("locations")
         Projects = T("projects")
         Users = T("users")
+        FarmVisits = T("farm_visits")
 
         FT = alias(Users, name="ft_user")
         BA = alias(Users, name="ba_user")
@@ -235,10 +254,9 @@ class FarmersRepository:
         gender_col = Farmer.c.gender if "gender" in Farmer.c else literal(None)
         age_col = Farmer.c.age if "age" in Farmer.c else literal(None)
         phone_col = Farmer.c.phone_number if "phone_number" in Farmer.c else literal(None)
-
-
-        coffee_tree_numbers_col = Household.c.number_of_trees
-        number_of_coffee_plots_col = Household.c.farm_size
+        number_of_trees_col = Household.c.number_of_trees if "number_of_trees" in Household.c else literal(None)
+        number_of_coffee_plots_col = Household.c.number_of_coffee_plots if "number_of_coffee_plots" in Household.c else literal(None)
+        farm_size_col = Household.c.farm_size if "farm_size" in Household.c else literal(None)
     
         coop_membership_col = (
             Farmer.c.coop_membership_number if "coop_membership_number" in Farmer.c else literal(None)
@@ -268,6 +286,34 @@ class FarmersRepository:
         is_primary_col = Farmer.c.is_primary_household_member if "is_primary_household_member" in Farmer.c else literal(None)
         updated_at_col = Farmer.c.updated_at if "updated_at" in Farmer.c else literal(None)
 
+        farm_visit_household_col = col(FarmVisits, "visited_household_id", "household_id")
+
+        visit_order_cols = []
+        if "latest_visit" in FarmVisits.c:
+            visit_order_cols.append(FarmVisits.c.latest_visit.desc().nullslast())
+        if "location_gps_latitude" in FarmVisits.c:
+            visit_order_cols.append(FarmVisits.c.location_gps_latitude.is_not(None).desc())
+        if "location_gps_longitude" in FarmVisits.c:
+            visit_order_cols.append(FarmVisits.c.location_gps_longitude.is_not(None).desc())
+        if "created_at" in FarmVisits.c:
+            visit_order_cols.append(FarmVisits.c.created_at.desc().nullslast())
+        if "updated_at" in FarmVisits.c:
+            visit_order_cols.append(FarmVisits.c.updated_at.desc().nullslast())
+        visit_order_cols.append(FarmVisits.c.id.desc())
+
+        latest_visit_sq = (
+            select(
+                farm_visit_household_col.label("visited_household_id"),
+                FarmVisits.c.id.label("latest_visit_id"),
+                func.row_number()
+                .over(partition_by=farm_visit_household_col, order_by=visit_order_cols)
+                .label("visit_rank"),
+            )
+            .subquery()
+        )
+
+        LatestFarmVisit = alias(FarmVisits, name="latest_farm_visit")
+
         q = (
             select(
                 project_name_col.label("Project"),
@@ -276,8 +322,9 @@ class FarmersRepository:
                 last_col.label("last_name"),
                 gender_col.label("gender"),
                 age_col.label("age"),
-                coffee_tree_numbers_col.label("coffee_tree_numbers"),
+                number_of_trees_col.label("number_of_trees"),
                 number_of_coffee_plots_col.label("number_of_coffee_plots"),
+                farm_size_col.label("farm_size"),
                 phone_col.label("phone_number"),
                 coop_membership_col.label("coop_membership_number"),
                 loc_name_col.label("location"),
@@ -303,12 +350,19 @@ class FarmersRepository:
                 ba_id_col.label("business_advisor_id"),
                 ba_name_col,
                 create_in_commcare_col.label("create_in_commcare"),
+                (LatestFarmVisit.c.location_gps_latitude if "location_gps_latitude" in LatestFarmVisit.c else literal(None)).label("location_gps_latitude"),
+                (LatestFarmVisit.c.location_gps_longitude if "location_gps_longitude" in LatestFarmVisit.c else literal(None)).label("location_gps_longitude"),
                 updated_at_col.label("updated_at"),
             )
             .select_from(Farmer)
             .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
             .join(Projects, FarmerGroup.c.project_id == Projects.c.id)
             .outerjoin(Household, Farmer.c.household_id == Household.c.id)
+            .outerjoin(
+                latest_visit_sq,
+                (latest_visit_sq.c.visited_household_id == Household.c.id) & (latest_visit_sq.c.visit_rank == 1),
+            )
+            .outerjoin(LatestFarmVisit, LatestFarmVisit.c.id == latest_visit_sq.c.latest_visit_id)
             .outerjoin(Location, FarmerGroup.c.location_id == Location.c.id)
             .outerjoin(FT, fg_responsible_col == ft_id_col)
             .outerjoin(BA, col(FT, "manager_id") == ba_id_col)

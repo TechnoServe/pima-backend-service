@@ -224,11 +224,14 @@ class FarmersService:
             "last_name",
             "gender",
             "age",
-            "coffee_tree_numbers",
+            "number_of_trees",
             "number_of_coffee_plots",
+            "farm_size",
             "phone_number",
             "coop_membership_number",
             "location",
+            "location_gps_latitude",
+            "location_gps_longitude",
             "farmer_sf_id",
             "from_sf",
             "tns_id",
@@ -275,11 +278,14 @@ class FarmersService:
                 r.get("last_name") or "",
                 r.get("gender") or "",
                 r.get("age") if r.get("age") is not None else "",
-                r.get("coffee_tree_numbers") if r.get("coffee_tree_numbers") is not None else "",
+                r.get("number_of_trees") if r.get("number_of_trees") is not None else "",
                 r.get("number_of_coffee_plots") if r.get("number_of_coffee_plots") is not None else "",
+                r.get("farm_size") if r.get("farm_size") is not None else "",
                 r.get("phone_number") if r.get("phone_number") is not None else "",
                 r.get("coop_membership_number") if r.get("coop_membership_number") is not None else "",
                 r.get("location") or "",
+                r.get("location_gps_latitude") if r.get("location_gps_latitude") is not None else "",
+                r.get("location_gps_longitude") if r.get("location_gps_longitude") is not None else "",
                 str(r.get("farmer_sf_id") or r.get("farmer_id") or ""),
                 bool(r.get("from_sf")),
                 r.get("tns_id") or "",
@@ -1100,16 +1106,17 @@ class FarmersService:
         household = T("households")
         values: dict = {}
 
-        coffee_trees = self._cell(row, header_idx, "coffee_tree_numbers")
-        if coffee_trees not in (None, "") and "number_of_trees" in household.c:
-            values["number_of_trees"] = int(coffee_trees)
+        number_of_trees = self._cell(row, header_idx, "number_of_trees")
+        if number_of_trees not in (None, "") and "number_of_trees" in household.c:
+            values["number_of_trees"] = int(number_of_trees)
 
         coffee_plots = self._cell(row, header_idx, "number_of_coffee_plots")
-        if coffee_plots not in (None, ""):
-            if "farm_size" in household.c:
-                values["farm_size"] = coffee_plots
-            elif "number_of_coffee_plots" in household.c:
-                values["number_of_coffee_plots"] = coffee_plots
+        if coffee_plots not in (None, "") and "number_of_coffee_plots" in household.c:
+            values["number_of_coffee_plots"] = coffee_plots
+
+        farm_size = self._cell(row, header_idx, "farm_size")
+        if farm_size not in (None, "") and "farm_size" in household.c:
+            values["farm_size"] = farm_size
 
         if values and "updated_at" in household.c:
             values["updated_at"] = datetime.utcnow()

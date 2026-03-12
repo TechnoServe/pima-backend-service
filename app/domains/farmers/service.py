@@ -287,9 +287,9 @@ class FarmersService:
                 r.get("last_name") or "",
                 r.get("gender") or "",
                 r.get("age") if r.get("age") is not None else "",
-                r.get("number_of_trees") if r.get("number_of_trees") is not None else "",
-                r.get("number_of_coffee_plots") if r.get("number_of_coffee_plots") is not None else "",
-                r.get("farm_size") if r.get("farm_size") is not None else "",
+                r.get("number_of_trees") if r.get("number_of_trees") is not None else None,
+                r.get("number_of_coffee_plots") if r.get("number_of_coffee_plots") is not None else None,
+                r.get("farm_size") if r.get("farm_size") is not None else None,
                 r.get("phone_number") if r.get("phone_number") is not None else "",
                 r.get("coop_membership_number") if r.get("coop_membership_number") is not None else "",
                 r.get("location") or "",
@@ -311,7 +311,7 @@ class FarmersService:
             ]
 
             if not hide_coffee_plots:
-                row.insert(9, r.get("number_of_coffee_plots") if r.get("number_of_coffee_plots") is not None else "")
+                row.insert(9, r.get("number_of_coffee_plots") if r.get("number_of_coffee_plots") is not None else None)
 
             module_vals = []
             sfid = str(r.get("farmer_sf_id") or r.get("farmer_id") or "").strip()
@@ -1120,15 +1120,18 @@ class FarmersService:
 
         number_of_trees = self._cell(row, header_idx, "number_of_trees")
         if number_of_trees not in (None, "") and "number_of_trees" in household.c:
-            values["number_of_trees"] = int(number_of_trees)
+            if self._is_explicit_null_value(number_of_trees):
+                values["number_of_trees"] = None
+            else:
+                values["number_of_trees"] = int(number_of_trees)
 
         coffee_plots = self._cell(row, header_idx, "number_of_coffee_plots")
         if coffee_plots not in (None, "") and "number_of_coffee_plots" in household.c:
-            values["number_of_coffee_plots"] = coffee_plots
+            values["number_of_coffee_plots"] = None if self._is_explicit_null_value(coffee_plots) else coffee_plots
 
         farm_size = self._cell(row, header_idx, "farm_size")
         if farm_size not in (None, "") and "farm_size" in household.c:
-            values["farm_size"] = farm_size
+            values["farm_size"] = None if self._is_explicit_null_value(farm_size) else farm_size
 
         if values and "updated_at" in household.c:
             values["updated_at"] = datetime.utcnow()
@@ -1148,6 +1151,10 @@ class FarmersService:
         if index is None or index >= len(row):
             return None
         return row[index]
+
+    @staticmethod
+    def _is_explicit_null_value(value) -> bool:
+        return isinstance(value, str) and value.strip().upper() == "NULL"
 
     async def _fail_run(self, run: UploadRun, *, message: str, failed_rows: int | None = None) -> None:
         run.status = "failed"

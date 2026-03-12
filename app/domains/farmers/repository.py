@@ -173,7 +173,7 @@ class FarmersRepository:
         q = (
             select(
                 func.count().label("total"),
-                func.sum(case((Farmer.c.send_to_commcare.is_(True), 1), else_=0)).label("pending_commcare"),
+                func.coalesce(func.sum(case((Farmer.c.send_to_commcare.is_(True), 1), else_=0)), 0).label("pending_commcare"),
             )
             .select_from(Farmer)
             .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)

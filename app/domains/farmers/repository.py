@@ -182,6 +182,23 @@ class FarmersRepository:
 
         res = await self.db.execute(q)
         return res.mappings().first() or {"total": 0, "pending_commcare": 0}
+
+    async def project_location_name(self, project_id: UUID) -> str | None:
+        Projects = T("projects")
+        Locations = T("locations")
+
+        if "location_id" not in Projects.c:
+            return None
+
+        loc_name_col = col(Locations, "location_name", "name", "title")
+        q = (
+            select(loc_name_col)
+            .select_from(Projects)
+            .outerjoin(Locations, Projects.c.location_id == Locations.c.id)
+            .where(Projects.c.id == project_id)
+            .limit(1)
+        )
+        return (await self.db.execute(q)).scalar_one_or_none()
     # ---------------- Export: training modules ----------------
     async def export_training_modules(self, project_id: UUID) -> List[dict]:
         TrainingModule = T("training_modules")
@@ -220,6 +237,7 @@ class FarmersRepository:
         Location = T("locations")
         Projects = T("projects")
         Users = T("users")
+        FarmVisits = T("farm_visits")
 
         FT = alias(Users, name="ft_user")
         BA = alias(Users, name="ba_user")
@@ -268,6 +286,19 @@ class FarmersRepository:
         is_primary_col = Farmer.c.is_primary_household_member if "is_primary_household_member" in Farmer.c else literal(None)
         updated_at_col = Farmer.c.updated_at if "updated_at" in Farmer.c else literal(None)
 
+        farm_visit_household_col = col(FarmVisits, "visited_household_id", "household_id")
+
+        latest_visit_sq = (
+            select(
+                farm_visit_household_col.label("visited_household_id"),
+                func.max(FarmVisits.c.id).label("latest_visit_id"),
+            )
+            .group_by(farm_visit_household_col)
+            .subquery()
+        )
+
+        LatestFarmVisit = alias(FarmVisits, name="latest_farm_visit")
+
         q = (
             select(
                 project_name_col.label("Project"),
@@ -303,12 +334,16 @@ class FarmersRepository:
                 ba_id_col.label("business_advisor_id"),
                 ba_name_col,
                 create_in_commcare_col.label("create_in_commcare"),
+                (LatestFarmVisit.c.location_gps_latitude if "location_gps_latitude" in LatestFarmVisit.c else literal(None)).label("location_gps_latitude"),
+                (LatestFarmVisit.c.location_gps_longitude if "location_gps_longitude" in LatestFarmVisit.c else literal(None)).label("location_gps_longitude"),
                 updated_at_col.label("updated_at"),
             )
             .select_from(Farmer)
             .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
             .join(Projects, FarmerGroup.c.project_id == Projects.c.id)
             .outerjoin(Household, Farmer.c.household_id == Household.c.id)
+            .outerjoin(latest_visit_sq, latest_visit_sq.c.visited_household_id == Household.c.id)
+            .outerjoin(LatestFarmVisit, LatestFarmVisit.c.id == latest_visit_sq.c.latest_visit_id)
             .outerjoin(Location, FarmerGroup.c.location_id == Location.c.id)
             .outerjoin(FT, fg_responsible_col == ft_id_col)
             .outerjoin(BA, col(FT, "manager_id") == ba_id_col)

@@ -183,6 +183,23 @@ class FarmersRepository:
         res = await self.db.execute(q)
         return res.mappings().first() or {"total": 0, "pending_commcare": 0}
 
+    async def project_location_name(self, project_id: UUID) -> str | None:
+        Projects = T("projects")
+        Locations = T("locations")
+
+        if "location_id" not in Projects.c:
+            return None
+
+        loc_name_col = col(Locations, "location_name", "name", "title")
+        q = (
+            select(loc_name_col)
+            .select_from(Projects)
+            .outerjoin(Locations, Projects.c.location_id == Locations.c.id)
+            .where(Projects.c.id == project_id)
+            .limit(1)
+        )
+        return (await self.db.execute(q)).scalar_one_or_none()
+
     # ---------------- Export: training modules ----------------
     async def export_training_modules(self, project_id: UUID) -> List[dict]:
         TrainingModule = T("training_modules")

@@ -240,119 +240,70 @@ class FarmersRepository:
         Users = T("users")
         FarmVisits = T("farm_visits")
 
+        # Define aliases for user tables
         FT = alias(Users, name="ft_user")
         BA = alias(Users, name="ba_user")
+        LatestFarmVisit = alias(FarmVisits, name="latest_farm_visit")
 
-        project_name_col = col(Projects, "name", "project_name", "title")
-
-        # from your schema / csv
-        farmer_sf_col = col(Farmer, "sf_id")
-        farmer_tns_col = col(Farmer, "tns_id")
-        first_col = col(Farmer, "first_name")
-        mid_col = Farmer.c.middle_name
-        last_col = col(Farmer, "last_name")
-        gender_col = Farmer.c.gender if "gender" in Farmer.c else literal(None)
-        age_col = Farmer.c.age if "age" in Farmer.c else literal(None)
-        phone_col = Farmer.c.phone_number if "phone_number" in Farmer.c else literal(None)
-        number_of_trees_col = Household.c.number_of_trees if "number_of_trees" in Household.c else literal(None)
-        number_of_coffee_plots_col = Household.c.number_of_coffee_plots if "number_of_coffee_plots" in Household.c else literal(None)
-        farm_size_col = Household.c.farm_size if "farm_size" in Household.c else literal(None)
-    
-        coop_membership_col = (
-            Farmer.c.coop_membership_number if "coop_membership_number" in Farmer.c else literal(None)
-        )
-
-        loc_name_col = col(Location, "location_name", "name", "title")
-        hh_number_col = Household.c.household_number if "household_number" in Household.c else literal(None)
-        hh_sf_col = Household.c.sf_id if "sf_id" in Household.c else literal(None)
-
-        ffg_id_col = col(FarmerGroup, "tns_id")
-        tg_name_col = col(FarmerGroup, "ffg_name", "name", "title")
-
-        status_col = Farmer.c.status if "status" in Farmer.c else literal(None)
-        farmer_status_col = Farmer.c.farmer_status if "farmer_status" in Farmer.c else literal(None)
-
-        # staff joins (your rules)
-        fg_responsible_col = col(FarmerGroup, "responsible_staff_id")
-        ft_id_col = col(FT, "id")
-        ft_name_col = name_expr(FT).label("farmer_trainer")
-
-        ba_id_col = col(BA, "id")
-        ba_name_col = name_expr(BA).label("business_advisor")
-
-        create_in_commcare_col = Farmer.c.send_to_commcare
-            
-
-        is_primary_col = Farmer.c.is_primary_household_member if "is_primary_household_member" in Farmer.c else literal(None)
-        updated_at_col = Farmer.c.updated_at if "updated_at" in Farmer.c else literal(None)
-
-        farm_visit_household_col = col(FarmVisits, "visited_household_id", "household_id")
-
-        visit_order_cols = []
-        if "latest_visit" in FarmVisits.c:
-            visit_order_cols.append(FarmVisits.c.latest_visit.desc().nullslast())
-        if "location_gps_latitude" in FarmVisits.c:
-            visit_order_cols.append(FarmVisits.c.location_gps_latitude.is_not(None).desc())
-        if "location_gps_longitude" in FarmVisits.c:
-            visit_order_cols.append(FarmVisits.c.location_gps_longitude.is_not(None).desc())
-        if "created_at" in FarmVisits.c:
-            visit_order_cols.append(FarmVisits.c.created_at.desc().nullslast())
-        if "updated_at" in FarmVisits.c:
-            visit_order_cols.append(FarmVisits.c.updated_at.desc().nullslast())
-        visit_order_cols.append(FarmVisits.c.id.desc())
-
+        # Subquery to get the latest farm visit for each household
         latest_visit_sq = (
             select(
-                farm_visit_household_col.label("visited_household_id"),
+                FarmVisits.c.visited_household_id.label("visited_household_id"),
                 FarmVisits.c.id.label("latest_visit_id"),
                 func.row_number()
-                .over(partition_by=farm_visit_household_col, order_by=visit_order_cols)
+                .over(
+                    partition_by=FarmVisits.c.visited_household_id,
+                    order_by=[
+                        FarmVisits.c.date_visited.desc().nullslast(),
+                        FarmVisits.c.updated_at.desc().nullslast(),
+                        FarmVisits.c.created_at.desc().nullslast(),
+                        FarmVisits.c.id.desc(),
+                    ],
+                )
                 .label("visit_rank"),
             )
+            .where(FarmVisits.c.is_deleted.is_(False))
             .subquery()
         )
 
-        LatestFarmVisit = alias(FarmVisits, name="latest_farm_visit")
-
         q = (
             select(
-                project_name_col.label("Project"),
-                first_col.label("first_name"),
-                mid_col.label("middle_name"),
-                last_col.label("last_name"),
-                gender_col.label("gender"),
-                age_col.label("age"),
-                number_of_trees_col.label("number_of_trees"),
-                number_of_coffee_plots_col.label("number_of_coffee_plots"),
-                farm_size_col.label("farm_size"),
-                phone_col.label("phone_number"),
-                coop_membership_col.label("coop_membership_number"),
-                loc_name_col.label("location"),
-                farmer_sf_col.label("farmer_sf_id"),
+                Projects.c.project_name.label("Project"),
+                Farmer.c.first_name.label("first_name"),
+                Farmer.c.middle_name.label("middle_name"),
+                Farmer.c.last_name.label("last_name"),
+                Farmer.c.gender.label("gender"),
+                Farmer.c.age.label("age"),
+                Household.c.number_of_trees.label("number_of_trees"),
+                Household.c.number_of_coffee_plots.label("number_of_coffee_plots"),
+                Household.c.farm_size.label("farm_size"),
+                Farmer.c.phone_number.label("phone_number"),
+                literal(None).label("coop_membership_number"),
+                Location.c.location_name.label("location"),
+                Farmer.c.sf_id.label("farmer_sf_id"),
                 Farmer.c.id.label("farmer_id"),
-                (Farmer.c.from_sf if "from_sf" in Farmer.c else literal(None)).label("from_sf"),
-                farmer_tns_col.label("tns_id"),
-                hh_number_col.label("hh_number"),
-                hh_sf_col.label("sf_household_id"),
+                Farmer.c.from_sf.label("from_sf"),
+                Farmer.c.tns_id.label("tns_id"),
+                Household.c.household_number.label("hh_number"),
+                Household.c.sf_id.label("sf_household_id"),
                 Household.c.id.label("household_id"),
-                # farmer_number: match your historical file logic (1 = primary, 2 = secondary)
                 case(
-                    (is_primary_col.is_(True), literal(1)),
-                    (is_primary_col.is_(False), literal(2)),
+                    (Farmer.c.is_primary_household_member.is_(True), literal(1)),
+                    (Farmer.c.is_primary_household_member.is_(False), literal(2)),
                     else_=literal(None),
                 ).label("farmer_number"),
-                ffg_id_col.label("ffg_id"),
-                tg_name_col.label("training_group"),
-                status_col.label("status"),
-                farmer_status_col.label("farmer_status"),
-                ft_id_col.label("farmer_trainer_id"),
-                ft_name_col,
-                ba_id_col.label("business_advisor_id"),
-                ba_name_col,
-                create_in_commcare_col.label("create_in_commcare"),
-                (LatestFarmVisit.c.location_gps_latitude if "location_gps_latitude" in LatestFarmVisit.c else literal(None)).label("location_gps_latitude"),
-                (LatestFarmVisit.c.location_gps_longitude if "location_gps_longitude" in LatestFarmVisit.c else literal(None)).label("location_gps_longitude"),
-                updated_at_col.label("updated_at"),
+                FarmerGroup.c.tns_id.label("ffg_id"),
+                FarmerGroup.c.ffg_name.label("training_group"),
+                Farmer.c.status.label("status"),
+                Farmer.c.farmer_status.label("farmer_status"),
+                FT.c.id.label("farmer_trainer_id"),
+                name_expr(FT).label("farmer_trainer"),
+                BA.c.id.label("business_advisor_id"),
+                name_expr(BA).label("business_advisor"),
+                Farmer.c.send_to_commcare.label("create_in_commcare"),
+                LatestFarmVisit.c.location_gps_latitude.label("location_gps_latitude"),
+                LatestFarmVisit.c.location_gps_longitude.label("location_gps_longitude"),
+                Farmer.c.updated_at.label("updated_at"),
             )
             .select_from(Farmer)
             .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
@@ -360,27 +311,34 @@ class FarmersRepository:
             .outerjoin(Household, Farmer.c.household_id == Household.c.id)
             .outerjoin(
                 latest_visit_sq,
-                (latest_visit_sq.c.visited_household_id == Farmer.c.household_id) & (latest_visit_sq.c.visit_rank == 1),
+                (latest_visit_sq.c.visited_household_id == Household.c.id)
+                & (latest_visit_sq.c.visit_rank == 1),
             )
-            .outerjoin(LatestFarmVisit, LatestFarmVisit.c.id == latest_visit_sq.c.latest_visit_id)
+            .outerjoin(
+                LatestFarmVisit,
+                LatestFarmVisit.c.id == latest_visit_sq.c.latest_visit_id,
+            )
             .outerjoin(Location, FarmerGroup.c.location_id == Location.c.id)
-            .outerjoin(FT, fg_responsible_col == ft_id_col)
-            .outerjoin(BA, col(FT, "manager_id") == ba_id_col)
-            .where(FarmerGroup.c.project_id == project_id, Farmer.c.is_deleted.is_(False))
-            .order_by(asc(farmer_tns_col))
+            .outerjoin(FT, FarmerGroup.c.responsible_staff_id == FT.c.id)
+            .outerjoin(BA, FT.c.manager_id == BA.c.id)
+            .where(
+                FarmerGroup.c.project_id == project_id,
+                Farmer.c.is_deleted.is_(False),
+            )
+            .order_by(asc(Farmer.c.tns_id))
         )
 
         return (await self.db.execute(q)).mappings().all()
-
+    
     # ---------------- Export: attendance map via training_sessions -> training_modules ----------------
     async def export_attendance_map(
-    self,
-    *,
-    project_id: UUID,
-    farmer_sf_ids: List[str],      # kept for signature compatibility, not used
-    farmer_ids: List[uuid.UUID],   # kept for signature compatibility, not used
-    training_modules: List[dict],
-) -> Dict[tuple[str, str], int]:
+        self,
+        *,
+        project_id: UUID,
+        farmer_sf_ids: List[str],
+        farmer_ids: List[uuid.UUID],
+        training_modules: List[dict],
+    ) -> Dict[tuple[str, str], int]:
         Attendance = T("attendances")
         Farmer = T("farmers")
         FarmerGroup = T("farmer_groups")
@@ -389,61 +347,50 @@ class FarmersRepository:
         if not training_modules:
             return {}
 
-        farmer_sf_col = col(Farmer, "sf_id")
-        farmer_id_col = col(Farmer, "id")
-        att_farmer_id_col = col(Attendance, "farmer_id")
-        att_session_id_col = col(Attendance, "training_session_id")
-        session_module_id_col = col(TrainingSession, "module_id")
-
-        status_col_exists = "status" in Attendance.c
-        attended_col_exists = "attended" in Attendance.c
-
         module_ids = [m["id"] for m in training_modules]
 
         q = (
             select(
-                farmer_sf_col.label("farmer_sf_id"),
-                farmer_id_col.label("farmer_id"),
-                session_module_id_col.label("module_id"),
-                (Attendance.c.attended if attended_col_exists else literal(None)).label("attended"),
-                (Attendance.c.status if status_col_exists else literal(None)).label("status"),
+                Farmer.c.sf_id.label("farmer_sf_id"),
+                Farmer.c.id.label("farmer_id"),
+                TrainingSession.c.module_id.label("module_id"),
+                Attendance.c.status.label("status"),
             )
             .select_from(Attendance)
-            .join(Farmer, att_farmer_id_col == Farmer.c.id)
+            .join(Farmer, Attendance.c.farmer_id == Farmer.c.id)
             .join(FarmerGroup, Farmer.c.farmer_group_id == FarmerGroup.c.id)
-            .join(TrainingSession, att_session_id_col == TrainingSession.c.id)
+            .join(TrainingSession, Attendance.c.training_session_id == TrainingSession.c.id)
             .where(
                 FarmerGroup.c.project_id == project_id,
                 Farmer.c.is_deleted.is_(False),
-                session_module_id_col.in_(module_ids),
+                Attendance.c.is_deleted.is_(False),
+                TrainingSession.c.module_id.in_(module_ids),
             )
         )
 
-        # If attendances table has project_id, keep it consistent (optional but fine)
-        if "project_id" in Attendance.c:
-            q = q.where(Attendance.c.project_id == project_id)
-
         rows = (await self.db.execute(q)).mappings().all()
 
-        module_key_by_id: Dict[UUID, str] = {m["id"]: str(m.get("sf_id") or m["id"]) for m in training_modules}
+        module_key_by_id: Dict[UUID, str] = {
+            m["id"]: str(m.get("sf_id") or m["id"])
+            for m in training_modules
+        }
+
         out: Dict[tuple[str, str], int] = {}
 
-        def to_bool(r) -> bool:
-            if attended_col_exists:
-                return bool(r.get("attended"))
-            if status_col_exists:
-                s = str(r.get("status") or "").strip().lower()
-                return s in ("present", "attended", "1", "true", "yes")
-            return False
+        def is_present(status) -> bool:
+            s = str(status or "").strip().lower()
+            return s in ("present", "attended", "1", "true", "yes")
 
         for r in rows:
             sfid = str(r.get("farmer_sf_id") or r.get("farmer_id") or "").strip()
             mid = r.get("module_id")
+
             if not sfid or not mid:
                 continue
+
             key = module_key_by_id.get(mid, str(mid))
             cur = out.get((sfid, key), 0)
-            out[(sfid, key)] = 1 if (cur == 1 or to_bool(r)) else 0
+            out[(sfid, key)] = 1 if (cur == 1 or is_present(r.get("status"))) else 0
 
         return out
 

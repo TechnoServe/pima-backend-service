@@ -213,6 +213,12 @@ class FarmersService:
 
     # ---------------- Export XLSX ----------------
     async def export_excel(self, *, project_id: UUID) -> bytes:
+        project_location_name = await self.repo.project_location_name(project_id)
+        location_name = (project_location_name or "").strip().lower()
+
+        hide_coffee_plots = location_name in {"zimbabwe", "ethiopia"}
+        use_farm_size_alias = location_name == "ethiopia"
+
         modules = await self.repo.export_training_modules(project_id)
         base_rows = await self.repo.export_farmers_base_rows(project_id)
 
@@ -224,11 +230,12 @@ class FarmersService:
             "last_name",
             "gender",
             "age",
-            "coffee_tree_numbers",
-            "number_of_coffee_plots",
+            "farm_size" if use_farm_size_alias else "coffee_tree_numbers",
             "phone_number",
             "coop_membership_number",
             "location",
+            "location_gps_latitude",
+            "location_gps_longitude",
             "farmer_sf_id",
             "from_sf",
             "tns_id",
@@ -243,6 +250,9 @@ class FarmersService:
             "business_advisor",
             "create_in_commcare",
         ]
+
+        if not hide_coffee_plots:
+            base_headers.insert(9, "number_of_coffee_plots")
 
         module_headers: List[str] = []
         for m in modules:
@@ -276,10 +286,11 @@ class FarmersService:
                 r.get("gender") or "",
                 r.get("age") if r.get("age") is not None else "",
                 r.get("coffee_tree_numbers") if r.get("coffee_tree_numbers") is not None else "",
-                r.get("number_of_coffee_plots") if r.get("number_of_coffee_plots") is not None else "",
                 r.get("phone_number") if r.get("phone_number") is not None else "",
                 r.get("coop_membership_number") if r.get("coop_membership_number") is not None else "",
                 r.get("location") or "",
+                r.get("location_gps_latitude") if r.get("location_gps_latitude") is not None else "",
+                r.get("location_gps_longitude") if r.get("location_gps_longitude") is not None else "",
                 str(r.get("farmer_sf_id") or r.get("farmer_id") or ""),
                 bool(r.get("from_sf")),
                 r.get("tns_id") or "",
@@ -294,6 +305,9 @@ class FarmersService:
                 r.get("business_advisor") or "",
                 bool(r.get("create_in_commcare")) if r.get("create_in_commcare") is not None else "",
             ]
+
+            if not hide_coffee_plots:
+                row.insert(9, r.get("number_of_coffee_plots") if r.get("number_of_coffee_plots") is not None else "")
 
             module_vals = []
             sfid = str(r.get("farmer_sf_id") or r.get("farmer_id") or "").strip()
@@ -1101,6 +1115,8 @@ class FarmersService:
         values: dict = {}
 
         coffee_trees = self._cell(row, header_idx, "coffee_tree_numbers")
+        if coffee_trees in (None, ""):
+            coffee_trees = self._cell(row, header_idx, "farm_size")
         if coffee_trees not in (None, "") and "number_of_trees" in household.c:
             values["number_of_trees"] = int(coffee_trees)
 

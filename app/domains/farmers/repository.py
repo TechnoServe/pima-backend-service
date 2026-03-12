@@ -289,6 +289,12 @@ class FarmersRepository:
         farm_visit_household_col = col(FarmVisits, "visited_household_id", "household_id")
 
         visit_order_cols = []
+        if "latest_visit" in FarmVisits.c:
+            visit_order_cols.append(FarmVisits.c.latest_visit.desc().nullslast())
+        if "location_gps_latitude" in FarmVisits.c:
+            visit_order_cols.append(FarmVisits.c.location_gps_latitude.is_not(None).desc())
+        if "location_gps_longitude" in FarmVisits.c:
+            visit_order_cols.append(FarmVisits.c.location_gps_longitude.is_not(None).desc())
         if "created_at" in FarmVisits.c:
             visit_order_cols.append(FarmVisits.c.created_at.desc().nullslast())
         if "updated_at" in FarmVisits.c:

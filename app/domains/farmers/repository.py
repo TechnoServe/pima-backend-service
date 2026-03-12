@@ -360,7 +360,7 @@ class FarmersRepository:
             .outerjoin(Household, Farmer.c.household_id == Household.c.id)
             .outerjoin(
                 latest_visit_sq,
-                (latest_visit_sq.c.visited_household_id == Household.c.id) & (latest_visit_sq.c.visit_rank == 1),
+                (latest_visit_sq.c.visited_household_id == Farmer.c.household_id) & (latest_visit_sq.c.visit_rank == 1),
             )
             .outerjoin(LatestFarmVisit, LatestFarmVisit.c.id == latest_visit_sq.c.latest_visit_id)
             .outerjoin(Location, FarmerGroup.c.location_id == Location.c.id)

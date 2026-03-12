@@ -253,10 +253,9 @@ class FarmersRepository:
         gender_col = Farmer.c.gender if "gender" in Farmer.c else literal(None)
         age_col = Farmer.c.age if "age" in Farmer.c else literal(None)
         phone_col = Farmer.c.phone_number if "phone_number" in Farmer.c else literal(None)
-
-
-        coffee_tree_numbers_col = Household.c.number_of_trees
-        number_of_coffee_plots_col = Household.c.farm_size
+        number_of_trees_col = Household.c.number_of_trees if "number_of_trees" in Household.c else literal(None)
+        number_of_coffee_plots_col = Household.c.number_of_coffee_plots if "number_of_coffee_plots" in Household.c else literal(None)
+        farm_size_col = Household.c.farm_size if "farm_size" in Household.c else literal(None)
     
         coop_membership_col = (
             Farmer.c.coop_membership_number if "coop_membership_number" in Farmer.c else literal(None)
@@ -316,8 +315,9 @@ class FarmersRepository:
                 last_col.label("last_name"),
                 gender_col.label("gender"),
                 age_col.label("age"),
-                coffee_tree_numbers_col.label("coffee_tree_numbers"),
+                number_of_trees_col.label("number_of_trees"),
                 number_of_coffee_plots_col.label("number_of_coffee_plots"),
+                farm_size_col.label("farm_size"),
                 phone_col.label("phone_number"),
                 coop_membership_col.label("coop_membership_number"),
                 loc_name_col.label("location"),

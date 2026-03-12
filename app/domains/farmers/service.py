@@ -1119,8 +1119,6 @@ class FarmersService:
         values: dict = {}
 
         number_of_trees = self._cell(row, header_idx, "number_of_trees")
-        if number_of_trees in (None, ""):
-            number_of_trees = self._cell(row, header_idx, "coffee_tree_numbers")
         if number_of_trees not in (None, "") and "number_of_trees" in household.c:
             values["number_of_trees"] = int(number_of_trees)
 

@@ -202,7 +202,13 @@ class WetmillsRepository:
 
         user_name_col = self._maybe_col(self.users, "user_name", "username", "name")
 
-        if not all([survey_type_col, form_visit_id_col, visit_id_col, survey_response_fk_col, question_name_col]):
+        if (
+            survey_type_col is None
+            or form_visit_id_col is None
+            or visit_id_col is None
+            or survey_response_fk_col is None
+            or question_name_col is None
+        ):
             return []
 
         predicates = [
@@ -221,9 +227,9 @@ class WetmillsRepository:
                 survey_type_col.label("survey_type"),
                 self.wetmills.c.name.label("wetmill_name"),
                 visit_date_col.label("visit_date") if visit_date_col is not None else self.survey_responses.c.created_at.label("visit_date"),
-                user_name_col.label("submitted_by") if user_name_col is not None else func.cast("", self.wetmills.c.name.type).label("submitted_by"),
+                user_name_col.label("submitted_by") if user_name_col is not None else func.null().label("submitted_by"),
                 completed_col.label("completed_date") if completed_col is not None else self.survey_responses.c.created_at.label("completed_date"),
-                feedback_col.label("general_feedback") if feedback_col is not None else func.cast("", self.wetmills.c.name.type).label("general_feedback"),
+                feedback_col.label("general_feedback") if feedback_col is not None else func.null().label("general_feedback"),
                 question_name_col.label("question_name"),
                 value_text_col.label("value_text") if value_text_col is not None else func.null().label("value_text"),
                 value_number_col.label("value_number") if value_number_col is not None else func.null().label("value_number"),
@@ -234,11 +240,13 @@ class WetmillsRepository:
             .select_from(self.survey_responses)
             .join(self.wetmill_visits, form_visit_id_col == visit_id_col)
             .join(self.wetmills, self.wetmills.c.id == self.wetmill_visits.c.wetmill_id)
-            .outerjoin(self.users, visit_user_id_col == self.users.c.id if visit_user_id_col is not None and user_name_col is not None else False)
             .outerjoin(self.survey_question_responses, survey_response_fk_col == self.survey_responses.c.id)
             .where(and_(*predicates))
             .order_by(self.survey_responses.c.id.asc())
         )
+
+        if visit_user_id_col is not None and user_name_col is not None:
+            query = query.outerjoin(self.users, visit_user_id_col == self.users.c.id)
 
         return list((await self.db.execute(query)).mappings().all())
 

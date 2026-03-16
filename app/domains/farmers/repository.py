@@ -32,7 +32,7 @@ class FarmersRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    # ---------------- Farmers listing (existing) ----------------
+    # ---------------- Farmers listing ----------------
     async def list_farmers(
         self,
         *,
@@ -303,6 +303,7 @@ class FarmersRepository:
                 Farmer.c.send_to_commcare.label("create_in_commcare"),
                 LatestFarmVisit.c.location_gps_latitude.label("location_gps_latitude"),
                 LatestFarmVisit.c.location_gps_longitude.label("location_gps_longitude"),
+                LatestFarmVisit.c.location_gps_altitude.label("location_gps_altitude"),
                 Farmer.c.updated_at.label("updated_at"),
             )
             .select_from(Farmer)

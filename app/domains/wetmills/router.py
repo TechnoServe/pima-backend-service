@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import os
-
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.background import BackgroundTask
 
 from app.auth.deps import get_current_user
 from app.db.session import get_session
@@ -13,14 +10,6 @@ from .schemas import PaginatedWetmillsResponse, WetmillsFilterOptionsResponse
 from .service import WetmillsService
 
 router = APIRouter(tags=["wetmills"])
-
-
-def _cleanup_file(path: str) -> None:
-    try:
-        if path and os.path.exists(path):
-            os.remove(path)
-    except Exception:
-        pass
 
 
 @router.get("/wetmills", response_model=PaginatedWetmillsResponse)
@@ -66,18 +55,17 @@ async def export_wetmills_excel(
     db: AsyncSession = Depends(get_session),
     _user=Depends(get_current_user),
 ):
-    path = await WetmillsService(db).export_excel(
+    data = await WetmillsService(db).export_excel(
         programme=programme,
         country=country,
         search=search,
         exporting_status=exporting_status,
         mill_status=mill_status,
     )
-    return FileResponse(
-        path=path,
+    return StreamingResponse(
+        iter([data]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename="wetmills_export.xlsx",
-        background=BackgroundTask(_cleanup_file, path),
+        headers={"Content-Disposition": 'attachment; filename="wetmills_export.xlsx"'},
     )
 
 
@@ -91,16 +79,15 @@ async def export_wetmills_csv(
     db: AsyncSession = Depends(get_session),
     _user=Depends(get_current_user),
 ):
-    path = await WetmillsService(db).export_csv(
+    data = await WetmillsService(db).export_csv(
         programme=programme,
         country=country,
         search=search,
         exporting_status=exporting_status,
         mill_status=mill_status,
     )
-    return FileResponse(
-        path=path,
+    return StreamingResponse(
+        iter([data]),
         media_type="text/csv",
-        filename="wetmills_export.csv",
-        background=BackgroundTask(_cleanup_file, path),
+        headers={"Content-Disposition": 'attachment; filename="wetmills_export.csv"'},
     )

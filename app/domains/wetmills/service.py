@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import csv
-import tempfile
+import io
+from collections import OrderedDict
 
 from openpyxl import Workbook
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,17 +55,10 @@ class WetmillsService:
                 payload["ownership_type"] = None
             items.append(payload)
 
-        return PaginatedWetmillsResponse(
-            items=items,
-            total=total,
-            page=page,
-            page_size=page_size,
-        )
+        return PaginatedWetmillsResponse(items=items, total=total, page=page, page_size=page_size)
 
     async def filter_options(self, *, programme: str, country: str | None) -> WetmillsFilterOptionsResponse:
-        return WetmillsFilterOptionsResponse(
-            **(await self.repo.filter_options(programme=programme, country=country))
-        )
+        return WetmillsFilterOptionsResponse(**(await self.repo.filter_options(programme=programme, country=country)))
 
     @staticmethod
     def _export_headers() -> list[str]:
@@ -101,29 +95,19 @@ class WetmillsService:
         ]
 
     @staticmethod
-    def _resolve_question_value(row: dict) -> str:
-        value = row.get("value_text")
-        if value is None:
-            value = row.get("value_number")
-        if value is None:
-            value = row.get("value_boolean")
-        if value is None:
-            value = row.get("value_date")
-        if value is None:
-            value = row.get("value_gps")
-        return "" if value is None else str(value)
-
-    @staticmethod
-    def _sheet_group_key(row: dict) -> tuple[str, str, str, str, str]:
-        visit_date = row.get("visit_date")
-        completed_date = row.get("completed_date")
-        return (
-            str(row.get("wetmill_name") or ""),
-            visit_date.isoformat() if visit_date else "",
-            str(row.get("submitted_by") or ""),
-            completed_date.isoformat() if completed_date else "",
-            str(row.get("general_feedback") or ""),
-        )
+    def _question_value(row: dict):
+        if row.get("value_text") is not None:
+            return row["value_text"]
+        if row.get("value_number") is not None:
+            return row["value_number"]
+        if row.get("value_boolean") is not None:
+            return row["value_boolean"]
+        if row.get("value_date") is not None:
+            value = row["value_date"]
+            return value.isoformat() if hasattr(value, "isoformat") else str(value)
+        if row.get("value_gps") is not None:
+            return str(row["value_gps"])
+        return ""
 
     async def export_excel(
         self,
@@ -133,27 +117,26 @@ class WetmillsService:
         search: str | None,
         exporting_status: str | None,
         mill_status: str | None,
-    ) -> str:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-        tmp.close()
+    ) -> bytes:
+        wb = Workbook()
+        default_sheet = wb.active
+        wb.remove(default_sheet)
 
-        wb = Workbook(write_only=True)
-
-        main_sheet = wb.create_sheet(title="Wetmills")
-        main_sheet.append(self._export_headers())
-
-        has_ownership = await self.repo.has_ownership_column()
-        async for row in self.repo.stream_wetmills_for_export(
+        main_rows, has_ownership = await self.repo.list_for_export(
             programme=programme,
             country=country,
             search=search,
             exporting_status=exporting_status,
             mill_status=mill_status,
-        ):
-            main_sheet.append(self._export_row(row, has_ownership))
+        )
+
+        main_sheet = wb.create_sheet(title="Wetmills")
+        main_sheet.append(self._export_headers())
+        for row in main_rows:
+            main_sheet.append(self._export_row(dict(row), has_ownership))
 
         for survey_type in self.ALLOWED_SURVEYS:
-            question_names = await self.repo.list_survey_question_names_for_export(
+            raw_rows = await self.repo.list_survey_responses_for_export(
                 programme=programme,
                 country=country,
                 search=search,
@@ -161,6 +144,28 @@ class WetmillsService:
                 mill_status=mill_status,
                 survey_type=survey_type,
             )
+
+            responses = OrderedDict()
+            question_names = []
+
+            for row in raw_rows:
+                response_id = row["survey_response_id"]
+
+                if response_id not in responses:
+                    responses[response_id] = {
+                        "wetmill_name": row.get("wetmill_name") or "",
+                        "visit_date": row.get("visit_date").isoformat() if row.get("visit_date") else "",
+                        "submitted_by": row.get("submitted_by") or "",
+                        "completed_date": row.get("completed_date").isoformat() if row.get("completed_date") else "",
+                        "general_feedback": row.get("general_feedback") or "",
+                        "questions": {},
+                    }
+
+                question_name = (row.get("question_name") or "").strip()
+                if question_name:
+                    if question_name not in question_names:
+                        question_names.append(question_name)
+                    responses[response_id]["questions"][question_name] = self._question_value(row)
 
             sheet = wb.create_sheet(title=survey_type[:31])
             headers = [
@@ -173,43 +178,21 @@ class WetmillsService:
             ]
             sheet.append(headers)
 
-            current_key: tuple[str, str, str, str, str] | None = None
-            current_payload: dict[str, str] | None = None
+            for response in responses.values():
+                row_data = {
+                    "Wetmill Name": response["wetmill_name"],
+                    "Visit Date": response["visit_date"],
+                    "Submitted By": response["submitted_by"],
+                    "Completed Date": response["completed_date"],
+                    "General Feedback": response["general_feedback"],
+                }
+                row_data.update(response["questions"])
+                sheet.append([row_data.get(h, "") for h in headers])
 
-            async for row in self.repo.stream_survey_data_for_export(
-                programme=programme,
-                country=country,
-                search=search,
-                exporting_status=exporting_status,
-                mill_status=mill_status,
-                survey_type=survey_type,
-            ):
-                row_key = self._sheet_group_key(row)
-
-                if current_key != row_key:
-                    if current_payload is not None:
-                        sheet.append([current_payload.get(h, "") for h in headers])
-
-                    current_key = row_key
-                    current_payload = {
-                        "Wetmill Name": row_key[0],
-                        "Visit Date": row_key[1],
-                        "Submitted By": row_key[2],
-                        "Completed Date": row_key[3],
-                        "General Feedback": row_key[4],
-                    }
-                    for question_name in question_names:
-                        current_payload[question_name] = ""
-
-                question_name = str(row.get("question_name") or "").strip()
-                if question_name and current_payload is not None:
-                    current_payload[question_name] = self._resolve_question_value(row)
-
-            if current_payload is not None:
-                sheet.append([current_payload.get(h, "") for h in headers])
-
-        wb.save(tmp.name)
-        return tmp.name
+        out = io.BytesIO()
+        wb.save(out)
+        out.seek(0)
+        return out.getvalue()
 
     async def export_csv(
         self,
@@ -219,22 +202,18 @@ class WetmillsService:
         search: str | None,
         exporting_status: str | None,
         mill_status: str | None,
-    ) -> str:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv", mode="w", newline="", encoding="utf-8")
-        try:
-            writer = csv.writer(tmp)
-            writer.writerow(self._export_headers())
+    ) -> bytes:
+        rows, has_ownership = await self.repo.list_for_export(
+            programme=programme,
+            country=country,
+            search=search,
+            exporting_status=exporting_status,
+            mill_status=mill_status,
+        )
 
-            has_ownership = await self.repo.has_ownership_column()
-            async for row in self.repo.stream_wetmills_for_export(
-                programme=programme,
-                country=country,
-                search=search,
-                exporting_status=exporting_status,
-                mill_status=mill_status,
-            ):
-                writer.writerow(self._export_row(row, has_ownership))
-        finally:
-            tmp.close()
-
-        return tmp.name
+        out = io.StringIO()
+        writer = csv.writer(out)
+        writer.writerow(self._export_headers())
+        for row in rows:
+            writer.writerow(self._export_row(dict(row), has_ownership))
+        return out.getvalue().encode("utf-8")

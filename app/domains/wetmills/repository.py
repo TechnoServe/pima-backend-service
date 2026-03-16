@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 from sqlalchemy import and_, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +31,9 @@ class WetmillsRepository:
                 return self.wetmills.c[candidate]
         return None
 
+    async def has_ownership_column(self) -> bool:
+        return self._ownership_column() is not None
+
     def _base_predicates(
         self,
         *,
@@ -39,12 +44,16 @@ class WetmillsRepository:
         search: str | None,
     ):
         predicates = [self.wetmills.c.is_deleted.is_(False), self.wetmills.c.programme == programme]
+
         if country:
             predicates.append(self.wetmills.c.country == country)
+
         if exporting_status:
             predicates.append(self.wetmills.c.exporting_status == exporting_status)
+
         if mill_status:
             predicates.append(self.wetmills.c.mill_status == mill_status)
+
         if search:
             like = f"%{search.strip()}%"
             predicates.append(
@@ -53,6 +62,7 @@ class WetmillsRepository:
                     self.wetmills.c.name.ilike(like),
                 )
             )
+
         return predicates
 
     async def list_wetmills(
@@ -102,11 +112,12 @@ class WetmillsRepository:
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
+
         total = (await self.db.execute(total_q)).scalar_one() or 0
         rows = list((await self.db.execute(data_q)).mappings().all())
         return rows, int(total), ownership_col is not None
 
-    async def list_for_export(
+    def _wetmills_export_query(
         self,
         *,
         programme: str,
@@ -114,7 +125,7 @@ class WetmillsRepository:
         search: str | None,
         exporting_status: str | None,
         mill_status: str | None,
-    ) -> tuple[list[dict], bool]:
+    ):
         predicates = self._base_predicates(
             programme=programme,
             country=country,
@@ -123,6 +134,7 @@ class WetmillsRepository:
             mill_status=mill_status,
         )
         ownership_col = self._ownership_column()
+
         cols = [
             self.wetmills.c.id,
             self.wetmills.c.wet_mill_unique_id,
@@ -140,15 +152,34 @@ class WetmillsRepository:
         if ownership_col is not None:
             cols.append(ownership_col.label("ownership_type"))
 
-        query = (
+        return (
             select(*cols)
             .select_from(self.wetmills)
             .where(and_(*predicates))
             .order_by(self.wetmills.c.created_at.desc())
         )
-        return list((await self.db.execute(query)).mappings().all()), ownership_col is not None
 
-    def _survey_export_query(
+    async def stream_wetmills_for_export(
+        self,
+        *,
+        programme: str,
+        country: str | None,
+        search: str | None,
+        exporting_status: str | None,
+        mill_status: str | None,
+    ) -> AsyncIterator[dict]:
+        query = self._wetmills_export_query(
+            programme=programme,
+            country=country,
+            search=search,
+            exporting_status=exporting_status,
+            mill_status=mill_status,
+        )
+        result = await self.db.stream(query)
+        async for row in result.mappings():
+            yield dict(row)
+
+    def _survey_export_base(
         self,
         *,
         programme: str,
@@ -199,10 +230,118 @@ class WetmillsRepository:
 
         user_name_col = self._maybe_col(self.users, "user_name", "username", "name")
 
+        base_from = (
+            self.survey_responses
+            .join(self.wetmill_visits, form_visit_id_col == visit_id_col)
+            .join(self.wetmills, self.wetmills.c.id == self.wetmill_visits.c.wetmill_id)
+            .outerjoin(
+                self.survey_question_responses,
+                survey_response_fk_col == self.survey_responses.c.id,
+            )
+        )
+
+        if visit_user_id_col is not None and user_name_col is not None:
+            base_from = base_from.outerjoin(self.users, visit_user_id_col == self.users.c.id)
+
+        base_predicates = [
+            and_(*predicates),
+            survey_type_col == survey_type,
+            self.survey_responses.c.is_deleted.is_(False),
+            self.wetmill_visits.c.is_deleted.is_(False),
+        ]
+
+        cols = {
+            "survey_type_col": survey_type_col,
+            "visit_date_col": visit_date_col,
+            "user_name_col": user_name_col,
+            "survey_completed_col": survey_completed_col,
+            "survey_feedback_col": survey_feedback_col,
+            "question_name_col": question_name_col,
+            "question_text_col": question_text_col,
+            "question_number_col": question_number_col,
+            "question_boolean_col": question_boolean_col,
+            "question_date_col": question_date_col,
+            "question_gps_col": question_gps_col,
+            "wetmill_name_col": self.wetmills.c.name,
+        }
+
+        return base_from, base_predicates, cols
+
+    async def list_survey_question_names_for_export(
+        self,
+        *,
+        programme: str,
+        country: str | None,
+        search: str | None,
+        exporting_status: str | None,
+        mill_status: str | None,
+        survey_type: str,
+    ) -> list[str]:
+        payload = self._survey_export_base(
+            programme=programme,
+            country=country,
+            search=search,
+            exporting_status=exporting_status,
+            mill_status=mill_status,
+            survey_type=survey_type,
+        )
+        if payload is None:
+            return []
+
+        base_from, base_predicates, cols = payload
+        question_name_col = cols["question_name_col"]
+
+        trimmed = func.nullif(func.trim(question_name_col), "")
+        query = (
+            select(trimmed.label("question_name"))
+            .select_from(base_from)
+            .where(*base_predicates)
+            .where(trimmed.is_not(None))
+            .group_by(trimmed)
+            .order_by(trimmed.asc())
+        )
+
+        rows = (await self.db.execute(query)).mappings().all()
+        return [str(row["question_name"]) for row in rows if row["question_name"] is not None]
+
+    async def stream_survey_data_for_export(
+        self,
+        *,
+        programme: str,
+        country: str | None,
+        search: str | None,
+        exporting_status: str | None,
+        mill_status: str | None,
+        survey_type: str,
+    ) -> AsyncIterator[dict]:
+        payload = self._survey_export_base(
+            programme=programme,
+            country=country,
+            search=search,
+            exporting_status=exporting_status,
+            mill_status=mill_status,
+            survey_type=survey_type,
+        )
+        if payload is None:
+            return
+
+        base_from, base_predicates, cols = payload
+
+        visit_date_col = cols["visit_date_col"]
+        user_name_col = cols["user_name_col"]
+        survey_completed_col = cols["survey_completed_col"]
+        survey_feedback_col = cols["survey_feedback_col"]
+        question_name_col = cols["question_name_col"]
+        question_text_col = cols["question_text_col"]
+        question_number_col = cols["question_number_col"]
+        question_boolean_col = cols["question_boolean_col"]
+        question_date_col = cols["question_date_col"]
+        question_gps_col = cols["question_gps_col"]
+        wetmill_name_col = cols["wetmill_name_col"]
+
         query = (
             select(
-                survey_type_col.label("survey_type"),
-                self.wetmills.c.name.label("wetmill_name"),
+                wetmill_name_col.label("wetmill_name"),
                 visit_date_col.label("visit_date") if visit_date_col is not None else literal(None).label("visit_date"),
                 user_name_col.label("submitted_by") if user_name_col is not None else literal(None).label("submitted_by"),
                 survey_completed_col.label("completed_date") if survey_completed_col is not None else literal(None).label("completed_date"),
@@ -214,47 +353,25 @@ class WetmillsRepository:
                 question_date_col.label("value_date") if question_date_col is not None else literal(None).label("value_date"),
                 question_gps_col.label("value_gps") if question_gps_col is not None else literal(None).label("value_gps"),
             )
-            .select_from(self.survey_responses)
-            .join(self.wetmill_visits, form_visit_id_col == visit_id_col)
-            .join(self.wetmills, self.wetmills.c.id == self.wetmill_visits.c.wetmill_id)
-            .outerjoin(
-                self.survey_question_responses,
-                survey_response_fk_col == self.survey_responses.c.id,
+            .select_from(base_from)
+            .where(*base_predicates)
+            .order_by(
+                wetmill_name_col.asc(),
+                visit_date_col.asc() if visit_date_col is not None else self.survey_responses.c.created_at.asc(),
+                user_name_col.asc() if user_name_col is not None else literal("").asc(),
+                survey_completed_col.asc() if survey_completed_col is not None else literal("").asc(),
+                survey_feedback_col.asc() if survey_feedback_col is not None else literal("").asc(),
+                question_name_col.asc(),
             )
-            .where(and_(*predicates))
-            .where(survey_type_col == survey_type)
-            .where(self.survey_responses.c.is_deleted.is_(False))
-            .where(self.wetmill_visits.c.is_deleted.is_(False))
-            .order_by(visit_date_col.asc() if visit_date_col is not None else self.survey_responses.c.created_at.asc())
         )
-        if visit_user_id_col is not None and user_name_col is not None:
-            query = query.outerjoin(self.users, visit_user_id_col == self.users.c.id)
-        return query
 
-    async def list_survey_data_for_export(
-        self,
-        *,
-        programme: str,
-        country: str | None,
-        search: str | None,
-        exporting_status: str | None,
-        mill_status: str | None,
-        survey_type: str,
-    ) -> list[dict]:
-        query = self._survey_export_query(
-            programme=programme,
-            country=country,
-            search=search,
-            exporting_status=exporting_status,
-            mill_status=mill_status,
-            survey_type=survey_type,
-        )
-        if query is None:
-            return []
-        return list((await self.db.execute(query)).mappings().all())
+        result = await self.db.stream(query)
+        async for row in result.mappings():
+            yield dict(row)
 
     async def filter_options(self, *, programme: str, country: str | None) -> dict:
         predicates = [self.wetmills.c.is_deleted.is_(False), self.wetmills.c.programme == programme]
+
         if country:
             predicates.append(self.wetmills.c.country == country)
 
@@ -274,6 +391,7 @@ class WetmillsRepository:
 
         ownership_col = self._ownership_column()
         ownership_values: list[str] = []
+
         if ownership_col is not None:
             trimmed = func.nullif(func.trim(ownership_col), "")
             query = (
@@ -284,7 +402,11 @@ class WetmillsRepository:
                 .group_by(trimmed)
                 .order_by(trimmed.asc())
             )
-            ownership_values = [row["value"] for row in (await self.db.execute(query)).mappings().all() if row["value"] is not None]
+            ownership_values = [
+                row["value"]
+                for row in (await self.db.execute(query)).mappings().all()
+                if row["value"] is not None
+            ]
 
         return {
             "countries": await distinct_values("country"),

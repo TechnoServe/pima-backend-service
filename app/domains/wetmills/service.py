@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import io
-from collections import OrderedDict
 
 from openpyxl import Workbook
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,10 +54,17 @@ class WetmillsService:
                 payload["ownership_type"] = None
             items.append(payload)
 
-        return PaginatedWetmillsResponse(items=items, total=total, page=page, page_size=page_size)
+        return PaginatedWetmillsResponse(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
 
     async def filter_options(self, *, programme: str, country: str | None) -> WetmillsFilterOptionsResponse:
-        return WetmillsFilterOptionsResponse(**(await self.repo.filter_options(programme=programme, country=country)))
+        return WetmillsFilterOptionsResponse(
+            **(await self.repo.filter_options(programme=programme, country=country))
+        )
 
     @staticmethod
     def _export_headers() -> list[str]:
@@ -95,18 +101,18 @@ class WetmillsService:
         ]
 
     @staticmethod
-    def _question_value(row: dict):
-        if row.get("value_text") is not None:
-            return row["value_text"]
-        if row.get("value_number") is not None:
-            return row["value_number"]
-        if row.get("value_boolean") is not None:
-            return row["value_boolean"]
-        if row.get("value_date") is not None:
-            value = row["value_date"]
+    def _question_value(question: dict):
+        if question.get("value_text") is not None:
+            return question["value_text"]
+        if question.get("value_number") is not None:
+            return question["value_number"]
+        if question.get("value_boolean") is not None:
+            return question["value_boolean"]
+        if question.get("value_date") is not None:
+            value = question["value_date"]
             return value.isoformat() if hasattr(value, "isoformat") else str(value)
-        if row.get("value_gps") is not None:
-            return str(row["value_gps"])
+        if question.get("value_gps") is not None:
+            return question["value_gps"]
         return ""
 
     async def export_excel(
@@ -119,8 +125,7 @@ class WetmillsService:
         mill_status: str | None,
     ) -> bytes:
         wb = Workbook()
-        default_sheet = wb.active
-        wb.remove(default_sheet)
+        wb.remove(wb.active)
 
         main_rows, has_ownership = await self.repo.list_for_export(
             programme=programme,
@@ -136,7 +141,7 @@ class WetmillsService:
             main_sheet.append(self._export_row(dict(row), has_ownership))
 
         for survey_type in self.ALLOWED_SURVEYS:
-            raw_rows = await self.repo.list_survey_responses_for_export(
+            responses = await self.repo.list_survey_export_payload(
                 programme=programme,
                 country=country,
                 search=search,
@@ -145,27 +150,12 @@ class WetmillsService:
                 survey_type=survey_type,
             )
 
-            responses = OrderedDict()
-            question_names = []
-
-            for row in raw_rows:
-                response_id = row["survey_response_id"]
-
-                if response_id not in responses:
-                    responses[response_id] = {
-                        "wetmill_name": row.get("wetmill_name") or "",
-                        "visit_date": row.get("visit_date").isoformat() if row.get("visit_date") else "",
-                        "submitted_by": row.get("submitted_by") or "",
-                        "completed_date": row.get("completed_date").isoformat() if row.get("completed_date") else "",
-                        "general_feedback": row.get("general_feedback") or "",
-                        "questions": {},
-                    }
-
-                question_name = (row.get("question_name") or "").strip()
-                if question_name:
-                    if question_name not in question_names:
+            question_names: list[str] = []
+            for response in responses:
+                for question in response["question_responses"]:
+                    question_name = (question.get("question_name") or "").strip()
+                    if question_name and question_name not in question_names:
                         question_names.append(question_name)
-                    responses[response_id]["questions"][question_name] = self._question_value(row)
 
             sheet = wb.create_sheet(title=survey_type[:31])
             headers = [
@@ -178,16 +168,21 @@ class WetmillsService:
             ]
             sheet.append(headers)
 
-            for response in responses.values():
+            for response in responses:
                 row_data = {
-                    "Wetmill Name": response["wetmill_name"],
-                    "Visit Date": response["visit_date"],
-                    "Submitted By": response["submitted_by"],
-                    "Completed Date": response["completed_date"],
-                    "General Feedback": response["general_feedback"],
+                    "Wetmill Name": response.get("wetmill_name") or "",
+                    "Visit Date": response.get("visit_date").isoformat() if response.get("visit_date") else "",
+                    "Submitted By": response.get("submitted_by") or "",
+                    "Completed Date": response.get("completed_date").isoformat() if response.get("completed_date") else "",
+                    "General Feedback": response.get("general_feedback") or "",
                 }
-                row_data.update(response["questions"])
-                sheet.append([row_data.get(h, "") for h in headers])
+
+                for question in response["question_responses"]:
+                    question_name = (question.get("question_name") or "").strip()
+                    if question_name:
+                        row_data[question_name] = self._question_value(question)
+
+                sheet.append([row_data.get(header, "") for header in headers])
 
         out = io.BytesIO()
         wb.save(out)

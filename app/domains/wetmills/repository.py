@@ -16,27 +16,14 @@ class WetmillsRepository:
         self.survey_question_responses = get_table("wv_survey_question_responses")
         self.users = get_table("users")
 
-    @staticmethod
-    def _maybe_col(tbl, *names: str):
-        for name in names:
-            if name in tbl.c:
-                return tbl.c[name]
-        return None
-
-    def _ownership_column(self):
-        for candidate in ("ownership_type", "ownership", "owner_type"):
-            if candidate in self.wetmills.c:
-                return self.wetmills.c[candidate]
-        return None
-
     def _base_predicates(
         self,
         *,
         programme: str,
         country: str | None,
+        search: str | None,
         exporting_status: str | None,
         mill_status: str | None,
-        search: str | None,
     ):
         predicates = [
             self.wetmills.c.is_deleted.is_(False),
@@ -81,7 +68,8 @@ class WetmillsRepository:
             exporting_status=exporting_status,
             mill_status=mill_status,
         )
-        ownership_col = self._ownership_column()
+
+        ownership_exists = "ownership_type" in self.wetmills.c
 
         cols = [
             self.wetmills.c.id,
@@ -98,8 +86,9 @@ class WetmillsRepository:
             self.wetmills.c.created_at,
             self.wetmills.c.updated_at,
         ]
-        if ownership_col is not None:
-            cols.append(ownership_col.label("ownership_type"))
+
+        if ownership_exists:
+            cols.append(self.wetmills.c.ownership_type.label("ownership_type"))
 
         total_q = select(func.count()).select_from(self.wetmills).where(and_(*predicates))
         data_q = (
@@ -113,7 +102,7 @@ class WetmillsRepository:
 
         total = (await self.db.execute(total_q)).scalar_one() or 0
         rows = list((await self.db.execute(data_q)).mappings().all())
-        return rows, int(total), ownership_col is not None
+        return rows, int(total), ownership_exists
 
     async def list_for_export(
         self,
@@ -131,7 +120,8 @@ class WetmillsRepository:
             exporting_status=exporting_status,
             mill_status=mill_status,
         )
-        ownership_col = self._ownership_column()
+
+        ownership_exists = "ownership_type" in self.wetmills.c
 
         cols = [
             self.wetmills.c.id,
@@ -147,8 +137,9 @@ class WetmillsRepository:
             self.wetmills.c.created_at,
             self.wetmills.c.updated_at,
         ]
-        if ownership_col is not None:
-            cols.append(ownership_col.label("ownership_type"))
+
+        if ownership_exists:
+            cols.append(self.wetmills.c.ownership_type.label("ownership_type"))
 
         query = (
             select(*cols)
@@ -158,9 +149,9 @@ class WetmillsRepository:
         )
 
         rows = list((await self.db.execute(query)).mappings().all())
-        return rows, ownership_col is not None
+        return rows, ownership_exists
 
-    async def list_survey_responses_for_export(
+    async def list_survey_export_payload(
         self,
         *,
         programme: str,
@@ -178,80 +169,108 @@ class WetmillsRepository:
             mill_status=mill_status,
         )
 
-        survey_type_col = self._maybe_col(self.survey_responses, "survey_type", "form_name")
-        form_visit_id_col = self._maybe_col(self.survey_responses, "form_visit_id", "wetmill_visit_id")
-        completed_col = self._maybe_col(self.survey_responses, "completed_date", "submitted_at", "created_at")
-        feedback_col = self._maybe_col(self.survey_responses, "general_feedback", "feedback", "comments")
-
-        visit_id_col = self._maybe_col(self.wetmill_visits, "id")
-        visit_date_col = self._maybe_col(self.wetmill_visits, "visit_date")
-        visit_user_id_col = self._maybe_col(self.wetmill_visits, "user_id")
-
-        survey_response_fk_col = self._maybe_col(
-            self.survey_question_responses,
-            "survey_response_id",
-            "wv_survey_response_id",
-            "response_id",
+        user_display_col = (
+            self.users.c.user_name
+            if "user_name" in self.users.c
+            else self.users.c.username
+            if "username" in self.users.c
+            else self.users.c.id
         )
-        question_name_col = self._maybe_col(self.survey_question_responses, "question_name")
-        value_text_col = self._maybe_col(self.survey_question_responses, "value_text")
-        value_number_col = self._maybe_col(self.survey_question_responses, "value_number")
-        value_boolean_col = self._maybe_col(self.survey_question_responses, "value_boolean")
-        value_date_col = self._maybe_col(self.survey_question_responses, "value_date")
-        value_gps_col = self._maybe_col(self.survey_question_responses, "value_gps")
 
-        user_name_col = self._maybe_col(self.users, "user_name", "username", "name")
-
-        if (
-            survey_type_col is None
-            or form_visit_id_col is None
-            or visit_id_col is None
-            or survey_response_fk_col is None
-            or question_name_col is None
-        ):
-            return []
-
-        predicates = [
-            *wetmill_predicates,
-            survey_type_col == survey_type,
-            self.survey_responses.c.is_deleted.is_(False),
-            self.wetmill_visits.c.is_deleted.is_(False),
-        ]
-
-        if visit_user_id_col is not None:
-            predicates.append(visit_user_id_col.is_not(None))
-
-        query = (
+        parent_query = (
             select(
                 self.survey_responses.c.id.label("survey_response_id"),
-                survey_type_col.label("survey_type"),
                 self.wetmills.c.name.label("wetmill_name"),
-                visit_date_col.label("visit_date") if visit_date_col is not None else self.survey_responses.c.created_at.label("visit_date"),
-                user_name_col.label("submitted_by") if user_name_col is not None else func.null().label("submitted_by"),
-                completed_col.label("completed_date") if completed_col is not None else self.survey_responses.c.created_at.label("completed_date"),
-                feedback_col.label("general_feedback") if feedback_col is not None else func.null().label("general_feedback"),
-                question_name_col.label("question_name"),
-                value_text_col.label("value_text") if value_text_col is not None else func.null().label("value_text"),
-                value_number_col.label("value_number") if value_number_col is not None else func.null().label("value_number"),
-                value_boolean_col.label("value_boolean") if value_boolean_col is not None else func.null().label("value_boolean"),
-                value_date_col.label("value_date") if value_date_col is not None else func.null().label("value_date"),
-                value_gps_col.label("value_gps") if value_gps_col is not None else func.null().label("value_gps"),
+                self.wetmill_visits.c.visit_date.label("visit_date"),
+                user_display_col.label("submitted_by"),
+                self.survey_responses.c.completed_date.label("completed_date"),
+                self.survey_responses.c.general_feedback.label("general_feedback"),
             )
             .select_from(self.survey_responses)
-            .join(self.wetmill_visits, form_visit_id_col == visit_id_col)
-            .join(self.wetmills, self.wetmills.c.id == self.wetmill_visits.c.wetmill_id)
-            .outerjoin(self.survey_question_responses, survey_response_fk_col == self.survey_responses.c.id)
-            .where(and_(*predicates))
+            .join(
+                self.wetmill_visits,
+                self.survey_responses.c.form_visit_id == self.wetmill_visits.c.id,
+            )
+            .join(
+                self.wetmills,
+                self.wetmill_visits.c.wetmill_id == self.wetmills.c.id,
+            )
+            .outerjoin(
+                self.users,
+                self.wetmill_visits.c.visiting_staff_id == self.users.c.id,
+            )
+            .where(
+                and_(
+                    *wetmill_predicates,
+                    self.survey_responses.c.is_deleted.is_(False),
+                    self.wetmill_visits.c.is_deleted.is_(False),
+                    self.survey_responses.c.survey_type == survey_type,
+                    self.wetmill_visits.c.visiting_staff_id.is_not(None),
+                )
+            )
             .order_by(self.survey_responses.c.id.asc())
         )
 
-        if visit_user_id_col is not None and user_name_col is not None:
-            query = query.outerjoin(self.users, visit_user_id_col == self.users.c.id)
+        parent_rows = list((await self.db.execute(parent_query)).mappings().all())
+        if not parent_rows:
+            return []
 
-        return list((await self.db.execute(query)).mappings().all())
+        response_ids = [row["survey_response_id"] for row in parent_rows]
+
+        question_query = (
+            select(
+                self.survey_question_responses.c.survey_response_id.label("survey_response_id"),
+                self.survey_question_responses.c.question_name.label("question_name"),
+                self.survey_question_responses.c.value_text.label("value_text"),
+                self.survey_question_responses.c.value_number.label("value_number"),
+                self.survey_question_responses.c.value_boolean.label("value_boolean"),
+                self.survey_question_responses.c.value_date.label("value_date"),
+                func.ST_AsText(self.survey_question_responses.c.value_gps).label("value_gps"),
+            )
+            .select_from(self.survey_question_responses)
+            .where(
+                and_(
+                    self.survey_question_responses.c.is_deleted.is_(False),
+                    self.survey_question_responses.c.survey_response_id.in_(response_ids),
+                )
+            )
+            .order_by(
+                self.survey_question_responses.c.survey_response_id.asc(),
+                self.survey_question_responses.c.question_name.asc(),
+            )
+        )
+
+        question_rows = list((await self.db.execute(question_query)).mappings().all())
+
+        questions_by_response: dict[str, list[dict]] = {}
+        for row in question_rows:
+            rid = row["survey_response_id"]
+            if rid not in questions_by_response:
+                questions_by_response[rid] = []
+            questions_by_response[rid].append(dict(row))
+
+        payload = []
+        for parent in parent_rows:
+            rid = parent["survey_response_id"]
+            payload.append(
+                {
+                    "survey_response_id": rid,
+                    "wetmill_name": parent.get("wetmill_name"),
+                    "visit_date": parent.get("visit_date"),
+                    "submitted_by": parent.get("submitted_by"),
+                    "completed_date": parent.get("completed_date"),
+                    "general_feedback": parent.get("general_feedback"),
+                    "question_responses": questions_by_response.get(rid, []),
+                }
+            )
+
+        return payload
 
     async def filter_options(self, *, programme: str, country: str | None) -> dict:
-        predicates = [self.wetmills.c.is_deleted.is_(False), self.wetmills.c.programme == programme]
+        predicates = [
+            self.wetmills.c.is_deleted.is_(False),
+            self.wetmills.c.programme == programme,
+        ]
 
         if country:
             predicates.append(self.wetmills.c.country == country)
@@ -270,11 +289,9 @@ class WetmillsRepository:
             rows = (await self.db.execute(query)).mappings().all()
             return [row["value"] for row in rows if row["value"] is not None]
 
-        ownership_col = self._ownership_column()
-        ownership_values: list[str] = []
-
-        if ownership_col is not None:
-            trimmed = func.nullif(func.trim(ownership_col), "")
+        ownership_types: list[str] = []
+        if "ownership_type" in self.wetmills.c:
+            trimmed = func.nullif(func.trim(self.wetmills.c.ownership_type), "")
             query = (
                 select(trimmed.label("value"))
                 .select_from(self.wetmills)
@@ -283,7 +300,7 @@ class WetmillsRepository:
                 .group_by(trimmed)
                 .order_by(trimmed.asc())
             )
-            ownership_values = [
+            ownership_types = [
                 row["value"]
                 for row in (await self.db.execute(query)).mappings().all()
                 if row["value"] is not None
@@ -293,5 +310,5 @@ class WetmillsRepository:
             "countries": await distinct_values("country"),
             "exporting_statuses": await distinct_values("exporting_status"),
             "mill_statuses": await distinct_values("mill_status"),
-            "ownership_types": ownership_values,
+            "ownership_types": ownership_types,
         }

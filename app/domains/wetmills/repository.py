@@ -182,6 +182,8 @@ class WetmillsRepository:
                 self.survey_responses.c.id.label("survey_response_id"),
                 self.wetmills.c.name.label("wetmill_name"),
                 self.wetmill_visits.c.visit_date.label("visit_date"),
+                self.users.c.first_name.label("first_name"),
+                self.users.c.last_name.label("last_name"),
                 user_display_col.label("submitted_by"),
                 self.survey_responses.c.completed_date.label("completed_date"),
                 self.survey_responses.c.general_feedback.label("general_feedback"),

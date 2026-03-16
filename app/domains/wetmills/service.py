@@ -172,7 +172,7 @@ class WetmillsService:
                 row_data = {
                     "Wetmill Name": response.get("wetmill_name") or "",
                     "Visit Date": response.get("visit_date").isoformat() if response.get("visit_date") else "",
-                    "Submitted By": response.get("submitted_by") or "",
+                    "Submitted By": response.get("first_name") + " " + response.get("last_name"),
                     "Completed Date": response.get("completed_date").isoformat() if response.get("completed_date") else "",
                     "General Feedback": response.get("general_feedback") or "",
                 }

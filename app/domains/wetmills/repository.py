@@ -259,7 +259,7 @@ class WetmillsRepository:
                     "survey_response_id": rid,
                     "wetmill_name": parent.get("wetmill_name"),
                     "visit_date": parent.get("visit_date"),
-                    "submitted_by": parent.get("submitted_by"),
+                    "submitted_by": str(parent.get("first_name")) + ' ' + str(parent.get("last_name")),
                     "completed_date": parent.get("completed_date"),
                     "general_feedback": parent.get("general_feedback"),
                     "question_responses": questions_by_response.get(rid, []),

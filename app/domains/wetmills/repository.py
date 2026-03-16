@@ -250,16 +250,18 @@ class WetmillsRepository:
             if rid not in questions_by_response:
                 questions_by_response[rid] = []
             questions_by_response[rid].append(dict(row))
+            
 
         payload = []
         for parent in parent_rows:
             rid = parent["survey_response_id"]
+            full_name = lambda parent: str(parent.get("first_name") or "") + ' ' + str(parent.get("last_name") or "")
             payload.append(
                 {
                     "survey_response_id": rid,
                     "wetmill_name": parent.get("wetmill_name"),
                     "visit_date": parent.get("visit_date"),
-                    "submitted_by": str(parent.get("first_name")) + ' ' + str(parent.get("last_name")),
+                    "submitted_by": full_name(parent),
                     "completed_date": parent.get("completed_date"),
                     "general_feedback": parent.get("general_feedback"),
                     "question_responses": questions_by_response.get(rid, []),

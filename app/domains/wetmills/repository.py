@@ -148,7 +148,7 @@ class WetmillsRepository:
         )
         return list((await self.db.execute(query)).mappings().all()), ownership_col is not None
 
-    async def list_survey_data_for_export(
+    def _survey_export_query(
         self,
         *,
         programme: str,
@@ -156,8 +156,8 @@ class WetmillsRepository:
         search: str | None,
         exporting_status: str | None,
         mill_status: str | None,
-        allowed_surveys: list[str],
-    ) -> list[dict]:
+        survey_type: str,
+    ):
         predicates = self._base_predicates(
             programme=programme,
             country=country,
@@ -172,7 +172,7 @@ class WetmillsRepository:
         survey_feedback_col = self._maybe_col(self.survey_responses, "general_feedback", "feedback", "comments")
 
         if survey_type_col is None or form_visit_id_col is None:
-            return []
+            return None
 
         question_name_col = self._maybe_col(self.survey_question_responses, "question_name")
         question_text_col = self._maybe_col(self.survey_question_responses, "value_text")
@@ -188,14 +188,14 @@ class WetmillsRepository:
             "response_id",
         )
         if question_name_col is None or survey_response_fk_col is None:
-            return []
+            return None
 
         visit_date_col = self._maybe_col(self.wetmill_visits, "visit_date")
         visit_id_col = self._maybe_col(self.wetmill_visits, "id")
         visit_user_id_col = self._maybe_col(self.wetmill_visits, "user_id")
 
         if visit_id_col is None:
-            return []
+            return None
 
         user_name_col = self._maybe_col(self.users, "user_name", "username", "name")
 
@@ -222,14 +222,35 @@ class WetmillsRepository:
                 survey_response_fk_col == self.survey_responses.c.id,
             )
             .where(and_(*predicates))
-            .where(survey_type_col.in_(allowed_surveys))
+            .where(survey_type_col == survey_type)
             .where(self.survey_responses.c.is_deleted.is_(False))
             .where(self.wetmill_visits.c.is_deleted.is_(False))
-            .order_by(survey_type_col.asc(), visit_date_col.asc() if visit_date_col is not None else self.survey_responses.c.created_at.asc())
+            .order_by(visit_date_col.asc() if visit_date_col is not None else self.survey_responses.c.created_at.asc())
         )
         if visit_user_id_col is not None and user_name_col is not None:
             query = query.outerjoin(self.users, visit_user_id_col == self.users.c.id)
+        return query
 
+    async def list_survey_data_for_export(
+        self,
+        *,
+        programme: str,
+        country: str | None,
+        search: str | None,
+        exporting_status: str | None,
+        mill_status: str | None,
+        survey_type: str,
+    ) -> list[dict]:
+        query = self._survey_export_query(
+            programme=programme,
+            country=country,
+            search=search,
+            exporting_status=exporting_status,
+            mill_status=mill_status,
+            survey_type=survey_type,
+        )
+        if query is None:
+            return []
         return list((await self.db.execute(query)).mappings().all())
 
     async def filter_options(self, *, programme: str, country: str | None) -> dict:

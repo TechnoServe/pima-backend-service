@@ -117,23 +117,15 @@ class WetmillsService:
         for row in rows:
             ws.append(self._export_row(dict(row), has_ownership))
 
-        survey_rows = await self.repo.list_survey_data_for_export(
-            programme=programme,
-            country=country,
-            search=search,
-            exporting_status=exporting_status,
-            mill_status=mill_status,
-            allowed_surveys=self.ALLOWED_SURVEYS,
-        )
-
-        grouped: dict[str, list[dict]] = {survey: [] for survey in self.ALLOWED_SURVEYS}
-        for row in survey_rows:
-            survey_type = str(row.get("survey_type") or "")
-            if survey_type in grouped:
-                grouped[survey_type].append(dict(row))
-
         for survey_type in self.ALLOWED_SURVEYS:
-            rows_for_sheet = grouped.get(survey_type, [])
+            rows_for_sheet = await self.repo.list_survey_data_for_export(
+                programme=programme,
+                country=country,
+                search=search,
+                exporting_status=exporting_status,
+                mill_status=mill_status,
+                survey_type=survey_type,
+            )
             sheet = wb.create_sheet(title=survey_type[:31])
 
             question_names = sorted({str(r.get("question_name") or "").strip() for r in rows_for_sheet if str(r.get("question_name") or "").strip()})

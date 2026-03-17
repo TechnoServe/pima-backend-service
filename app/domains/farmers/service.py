@@ -215,6 +215,7 @@ class FarmersService:
     async def export_excel(self, *, project_id: UUID) -> bytes:
         project_location_name = await self.repo.project_location_name(project_id)
         location_name = (project_location_name or "").strip().lower()
+        is_zimbabwe = location_name == "zimbabwe"
 
         hide_coffee_plots = location_name in {"zimbabwe", "ethiopia"}
         use_farm_size_alias = location_name == "ethiopia"
@@ -234,7 +235,7 @@ class FarmersService:
             "number_of_coffee_plots",
             "farm_size",
             "phone_number",
-            "other_id",
+            "growers_number" if is_zimbabwe else "other_id",
             "location",
             "location_gps_latitude",
             "location_gps_longitude",
@@ -250,7 +251,7 @@ class FarmersService:
             "status",
             "farmer_status",
             "farmer_trainer",
-            "business_advisor",
+            "agronomy_advisor" if is_zimbabwe else "business_advisor",
             "create_in_commcare",
         ]
 
@@ -690,6 +691,9 @@ class FarmersService:
                     raise ValidationError("Uploaded file location is missing")
                 file_bytes = download_bytes(run.gcs_object_name)
 
+            project_location_name = await self.repo.project_location_name(run.project_id)
+            is_zimbabwe = (project_location_name or "").strip().lower() == "zimbabwe"
+
             wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
             ws = wb.active
 
@@ -741,6 +745,7 @@ class FarmersService:
                             module_uuid_by_key=module_uuid_by_key,
                             row_errors=row_errors,
                             group_id_by_ffg=group_id_by_ffg,
+                            is_zimbabwe=is_zimbabwe,
                         )
                     success_count += 1
                 except Exception as exc:
@@ -815,6 +820,7 @@ class FarmersService:
         module_uuid_by_key: Dict[str, UUID],
         row_errors: list[UploadRowError],
         group_id_by_ffg: dict[str, UUID],
+        is_zimbabwe: bool,
     ) -> None:
         farmer_identifier = str(self._cell(row, header_idx, "farmer_sf_id") or "").strip()
         if not farmer_identifier:
@@ -914,7 +920,12 @@ class FarmersService:
                     raise ValidationError("A household cannot have more than one active primary member")
 
         # Farmer updates (ensure farmer_group_id + household_id are correct for moves)
-        farmer_updates = self._build_farmer_updates(row=row, header_idx=header_idx, from_sf=from_sf)
+        farmer_updates = self._build_farmer_updates(
+            row=row,
+            header_idx=header_idx,
+            from_sf=from_sf,
+            is_zimbabwe=is_zimbabwe,
+        )
 
         farmer_updates["farmer_group_id"] = target_group_id
         if "household_id" in T("farmers").c:
@@ -996,7 +1007,14 @@ class FarmersService:
                 updated_by=run.uploaded_by_id,
             )
 
-    def _build_farmer_updates(self, *, row, header_idx: dict[str, int], from_sf: bool | None) -> dict:
+    def _build_farmer_updates(
+        self,
+        *,
+        row,
+        header_idx: dict[str, int],
+        from_sf: bool | None,
+        is_zimbabwe: bool,
+    ) -> dict:
         farmer_table = T("farmers")
         updates: dict = {}
 
@@ -1029,6 +1047,11 @@ class FarmersService:
 
         if "from_sf" in farmer_table.c and from_sf is not None:
             updates["from_sf"] = from_sf
+
+        if is_zimbabwe and "other_id" in farmer_table.c:
+            growers_number = self._cell(row, header_idx, "growers_number")
+            if growers_number not in (None, ""):
+                updates["other_id"] = str(growers_number).strip()
 
         return updates
 

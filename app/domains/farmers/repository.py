@@ -278,7 +278,7 @@ class FarmersRepository:
                 Household.c.number_of_coffee_plots.label("number_of_coffee_plots"),
                 Household.c.farm_size.label("farm_size"),
                 Farmer.c.phone_number.label("phone_number"),
-                literal(None).label("coop_membership_number"),
+                Farmer.c.other_id.label("other_id"),
                 Location.c.location_name.label("location"),
                 Farmer.c.sf_id.label("farmer_sf_id"),
                 Farmer.c.id.label("farmer_id"),

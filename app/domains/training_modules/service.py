@@ -139,7 +139,7 @@ class TrainingModulesService:
                     self.repo.build_training_session_create_data(
                         module_id=created_module["id"],
                         farmer_group_id=group["id"],
-                        trainer_id=group.get("responsible_staff_id"),
+                        # trainer_id=group.get("responsible_staff_id"),
                         current_user_id=user_id,
                     )
                 )

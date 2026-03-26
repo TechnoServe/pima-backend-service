@@ -280,7 +280,7 @@ class TrainingModulesRepository:
             "id": session_id,
             "module_id": module_id,
             "farmer_group_id": farmer_group_id,
-            "trainer_id": trainer_id,
+            # "trainer_id": trainer_id,
             "commcare_case_id": str(session_id),
             "send_to_commcare": True,
             "send_to_commcare_status": "New",

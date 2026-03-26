@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.rbac import is_admin
 from app.core.pagination import compute_pages
 from app.shared.api_errors import ConflictError, NotFoundError, ValidationError
+from app.domains.households.service import HouseholdSamplingService
 
 from .repository import TrainingModulesRepository
 from .schemas import CreateTrainingModuleRequest
@@ -152,6 +153,22 @@ class TrainingModulesService:
                 module_id=created_module["id"],
                 sessions_payload=sessions_payload,
             )
+
+            if bool(created_module.get("sample_fv_aa_households")):
+                await self.repo.update_sample_fv_aa_households_status(
+                    module_id=created_module["id"],
+                    status="Pending",
+                    current_user_id=user_id,
+                )
+                await HouseholdSamplingService(self.db).sample_households_for_project(
+                    project_id=created_module["project_id"],
+                    current_user_id=user_id,
+                )
+                await self.repo.update_sample_fv_aa_households_status(
+                    module_id=created_module["id"],
+                    status="Complete",
+                    current_user_id=user_id,
+                )
 
         return {
             "module": self._module_response_item(created_module),

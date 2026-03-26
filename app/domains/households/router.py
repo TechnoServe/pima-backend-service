@@ -25,10 +25,16 @@ async def trigger_project_household_sampling(
     user=Depends(get_current_user),
 ):
     await require_project_access(db, user, project_id)
-    sampled_household_ids = await HouseholdSamplingService(db).sample_households_for_project(
-        project_id=project_id,
-        current_user_id=UUID(str(user["id"])),
-    )
+    try:
+        sampled_household_ids = await HouseholdSamplingService(db).sample_households_for_project(
+            project_id=project_id,
+            current_user_id=UUID(str(user["id"])),
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
     return {
         "project_id": project_id,
         "sampled_count": len(sampled_household_ids),

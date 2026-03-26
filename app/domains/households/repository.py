@@ -58,6 +58,17 @@ class HouseholdsRepository:
             grouped[row["farmer_group_id"]].append(row)
         return grouped
 
+
+    async def increment_farmer_group_sampling_round(self, farmer_group_id: UUID) -> int:
+        stmt = (
+            update(self.farmer_groups)
+            .where(self.farmer_groups.c.id == farmer_group_id)
+            .values(fv_aa_sampling_round=self.farmer_groups.c.fv_aa_sampling_round + 1)
+            .returning(self.farmer_groups.c.fv_aa_sampling_round)
+        )
+        new_round = (await self.db.execute(stmt)).scalar_one()
+        return int(new_round or 0)
+
     async def reset_group_households_for_new_round(
         self,
         *,

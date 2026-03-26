@@ -13,6 +13,7 @@ class FakeHouseholdRepo:
         self._households = households
         self.resets: list[tuple] = []
         self.sample_marks: list[tuple] = []
+        self.increment_calls: list = []
 
     def validate_sampling_schema(self) -> None:
         return None
@@ -29,6 +30,14 @@ class FakeHouseholdRepo:
         for row in households:
             grouped.setdefault(row["farmer_group_id"], []).append(dict(row))
         return grouped
+
+    async def increment_farmer_group_sampling_round(self, farmer_group_id):
+        self.increment_calls.append(farmer_group_id)
+        for group in self._farmer_groups:
+            if group["id"] == farmer_group_id:
+                group["fv_aa_sampling_round"] = int(group.get("fv_aa_sampling_round") or 0) + 1
+                return group["fv_aa_sampling_round"]
+        return 0
 
     async def reset_group_households_for_new_round(self, *, farmer_group_id, target_sampling_round, current_user_id):
         self.resets.append((farmer_group_id, target_sampling_round, current_user_id))
@@ -87,7 +96,7 @@ class HouseholdSamplingServiceTests(unittest.IsolatedAsyncioTestCase):
         sampled = await service.sample_households_for_project(project_id=uuid4())
 
         self.assertEqual(len(repo.resets), 1)
-        self.assertEqual(repo.resets[0][1], 2)
+        self.assertEqual(repo.resets[0][1], 3)
         self.assertEqual(len(sampled), 4)
 
     async def test_only_project_groups_considered(self):

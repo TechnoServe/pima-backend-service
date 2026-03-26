@@ -50,6 +50,7 @@ class HouseholdSamplingService:
 
             all_visited = all(bool(h.get("visited_for_fv_aa")) for h in group_households)
             if all_visited:
+                group_round = await self.repo.increment_farmer_group_sampling_round(farmer_group_id)
                 await self.repo.reset_group_households_for_new_round(
                     farmer_group_id=farmer_group_id,
                     target_sampling_round=group_round,

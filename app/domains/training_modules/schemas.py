@@ -67,7 +67,6 @@ class CreateTrainingModuleRequest(BaseModel):
     module_number: int
     current_module: bool = False
     sample_fv_aa_households: bool = False
-    sample_fv_aa_households_status: str | None = None
     status: str | None = "Active"
     current_previous: Literal["Current", "Previous", ""] | None = None
     module_date: date | None = None

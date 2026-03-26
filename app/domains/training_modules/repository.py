@@ -288,7 +288,6 @@ class TrainingModulesRepository:
         *,
         module_id: UUID,
         farmer_group_id: UUID,
-        trainer_id: UUID | None,
         current_user_id: UUID,
     ) -> dict:
         now = datetime.now(timezone.utc)

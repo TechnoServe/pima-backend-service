@@ -208,6 +208,23 @@ class TrainingModulesRepository:
         row = (await self.db.execute(stmt)).mappings().first()
         return dict(row) if row else {}
 
+
+    async def update_sample_fv_aa_households_status(
+        self,
+        module_id: UUID,
+        status: str,
+        current_user_id: UUID,
+    ) -> None:
+        if "sample_fv_aa_households_status" not in self.training_modules.c:
+            return
+        values = {"sample_fv_aa_households_status": status}
+        if "last_updated_by_id" in self.training_modules.c:
+            values["last_updated_by_id"] = current_user_id
+        if "updated_at" in self.training_modules.c:
+            values["updated_at"] = datetime.now(timezone.utc)
+        stmt = update(self.training_modules).where(self.training_modules.c.id == module_id).values(**values)
+        await self.db.execute(stmt)
+
     async def mark_module_sessions_for_commcare(self, module_id: UUID, current_user_id: UUID) -> int:
         values = {}
         if "send_to_commcare" in self.training_sessions.c:

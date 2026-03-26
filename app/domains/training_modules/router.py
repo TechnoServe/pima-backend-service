@@ -47,6 +47,7 @@ def _require_super_admin(current_user: dict) -> None:
         raise Forbidden("Only Super Admin can perform this action")
 
 
+# List all project training modules
 @router.get("", response_model=TrainingModulesListResponse)
 async def list_training_modules(
     project_id: UUID,
@@ -72,7 +73,7 @@ async def list_training_modules(
         )
     )
 
-
+# Get details of a training module, including its training sessions and their details
 @router.get("/{module_id}", response_model=TrainingModuleDetailsResponse)
 async def get_training_module_details(
     module_id: UUID,
@@ -91,6 +92,7 @@ async def get_training_module_details(
     )
 
 
+# Create a new training module
 @router.post("", response_model=CreateTrainingModuleResponse)
 async def create_training_module(
     payload: CreateTrainingModuleRequest,
@@ -101,6 +103,7 @@ async def create_training_module(
     return await _service_call(TrainingModulesService(db).create_training_module(payload=payload, current_user=user))
 
 
+# Change the current and previous modules
 @router.patch("/{module_id}/current-previous", response_model=ChangeCurrentPreviousResponse)
 async def change_current_previous(
     module_id: UUID,
@@ -117,7 +120,7 @@ async def change_current_previous(
         )
     )
 
-
+# Send training sessions of a module to CommCare HQ
 @router.post(
     "/{module_id}/send-training-sessions-to-commcare",
     response_model=SendTrainingSessionsToCommCareResponse,

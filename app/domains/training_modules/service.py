@@ -104,6 +104,7 @@ class TrainingModulesService:
         }
 
     async def create_training_module(self, *, payload: CreateTrainingModuleRequest, current_user: dict) -> dict:
+        # 1. Validate project exists
         project = await self.repo.get_project(payload.project_id)
         if not project:
             raise NotFoundError("Project not found")
@@ -124,9 +125,12 @@ class TrainingModulesService:
 
             payload_data = payload.model_dump()
             payload_data["current_previous"] = normalized_current_previous
+            # 2. Create the training module
             module_data = self.repo.build_module_create_data(payload_data, user_id)
             created_module = await self.repo.create_module(module_data)
-
+            
+            
+            # 3. Create training sessions for all farmer groups in the project
             groups = await self.repo.list_project_farmer_groups(payload.project_id)
             group_ids = [g["id"] for g in groups]
             existing_group_ids = await self.repo.existing_session_farmer_group_ids(created_module["id"], group_ids)

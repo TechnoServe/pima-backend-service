@@ -80,15 +80,9 @@ class HouseholdsRepository:
             "visited_for_fv_aa": False,
             "sampled_for_fv_aa": False,
             "fv_aa_sampling_round": target_sampling_round,
+            "updated_at": datetime.now(timezone.utc),
+            "last_updated_by_id": current_user_id
         }
-        if "send_to_commcare" in self.households.c:
-            values["send_to_commcare"] = False
-        if "send_to_commcare_status" in self.households.c:
-            values["send_to_commcare_status"] = None
-        if current_user_id and "last_updated_by_id" in self.households.c:
-            values["last_updated_by_id"] = current_user_id
-        if "updated_at" in self.households.c:
-            values["updated_at"] = datetime.now(timezone.utc)
 
         stmt = (
             update(self.households)
@@ -97,6 +91,7 @@ class HouseholdsRepository:
         )
         result = await self.db.execute(stmt)
         return result.rowcount or 0
+
 
     async def mark_households_as_sampled(
         self,
@@ -108,18 +103,27 @@ class HouseholdsRepository:
         if not household_ids:
             return 0
 
-        values: dict = {
+        values = {
             "sampled_for_fv_aa": True,
             "visited_for_fv_aa": False,
             "fv_aa_sampling_round": sampling_round,
             "send_to_commcare": True,
             "send_to_commcare_status": "Pending",
         }
+
         if current_user_id and "last_updated_by_id" in self.households.c:
             values["last_updated_by_id"] = current_user_id
+
         if "updated_at" in self.households.c:
             values["updated_at"] = datetime.now(timezone.utc)
 
-        stmt = update(self.households).where(self.households.c.id.in_(household_ids)).values(**values)
+        stmt = (
+            update(self.households)
+            .where(self.households.c.id.in_(household_ids))
+            .values(**values)
+            .returning(self.households.c.id)
+        )
+
         result = await self.db.execute(stmt)
-        return result.rowcount or 0
+        updated_ids = result.scalars().all()
+        return len(updated_ids)

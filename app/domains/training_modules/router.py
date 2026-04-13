@@ -26,12 +26,14 @@ from .service import TrainingModulesService
 router = APIRouter(prefix="/training-modules", tags=["training_modules"])
 
 
+# Helper function to await a value if it's awaitable, otherwise return it directly
 async def _maybe_await(x):
     if inspect.isawaitable(x):
         return await x
     return x
 
 
+# Helper function to call service methods and handle DomainError exceptions, converting them to HTTPExceptions
 async def _service_call(call):
     try:
         return await _maybe_await(call)
@@ -42,12 +44,16 @@ async def _service_call(call):
         raise HTTPException(status_code=exc.status_code, detail=detail) from exc
 
 
+# Check if the current user is a super admin, raise Forbidden if not
 def _require_super_admin(current_user: dict) -> None:
     if not is_admin(current_user.get("user_role")):
         raise Forbidden("Only Super Admin can perform this action")
 
 
-# List all project training modules
+# List all training modules by project
+# * Pagination: page number and page size
+# * Search: by module name
+# * Filter: by status (e.g. "active", "inactive"), by current/previous, by current module
 @router.get("", response_model=TrainingModulesListResponse)
 async def list_training_modules(
     project_id: UUID,
@@ -73,7 +79,7 @@ async def list_training_modules(
         )
     )
 
-# Get details of a training module, including its training sessions and their details
+# Get details of a single training module, including its training sessions and their details
 @router.get("/{module_id}", response_model=TrainingModuleDetailsResponse)
 async def get_training_module_details(
     module_id: UUID,

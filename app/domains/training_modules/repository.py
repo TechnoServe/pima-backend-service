@@ -193,12 +193,13 @@ class TrainingModulesRepository:
                 demote_current_stmt = demote_current_stmt.where(self.training_modules.c.id != exclude_module_id)
             await self.db.execute(demote_current_stmt.values(**set_previous_values))
 
+    # Change the current and previous modules
     async def update_module_current_previous(self, module_id: UUID, current_previous: str | None, current_user_id: UUID) -> dict:
         values = {"current_previous": current_previous}
-        if "last_updated_by_id" in self.training_modules.c:
-            values["last_updated_by_id"] = current_user_id
-        if "updated_at" in self.training_modules.c:
-            values["updated_at"] = datetime.now(timezone.utc)
+        values["last_updated_by_id"] = current_user_id
+        values["updated_at"] = datetime.now(timezone.utc)
+        values["current_module"] = current_previous == "Current"
+        
         stmt = (
             update(self.training_modules)
             .where(self.training_modules.c.id == module_id)

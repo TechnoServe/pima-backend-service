@@ -176,6 +176,7 @@ class TrainingModulesService:
             "message": "Training module created successfully.",
         }
 
+    # Change the current and previous modules
     async def change_current_previous(self, *, module_id: UUID, current_previous: str | None, current_user: dict) -> dict:
         normalized_current_previous = self._normalize_current_previous(current_previous)
 

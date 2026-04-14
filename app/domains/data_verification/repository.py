@@ -308,3 +308,168 @@ class DataVerificationRepository:
         if image_verdict_col is not None:
             await self.db.execute(update(images).where(images.c.id == image_id)
                                   .values({image_verdict_col.name: verdict, images.c.verification_status: 'reviewed'}))
+
+    async def project_exists(self, project_id: UUID) -> bool:
+        projects = T("projects")
+        exists_query = select(func.count()).select_from(projects).where(projects.c.id == project_id)
+        total = (await self.db.execute(exists_query)).scalar_one() or 0
+        return bool(total)
+
+    async def training_group_belongs_to_project(self, project_id: UUID, training_group_id: UUID) -> bool:
+        farmer_groups = T("farmer_groups")
+        exists_query = (
+            select(func.count())
+            .select_from(farmer_groups)
+            .where(farmer_groups.c.id == training_group_id)
+            .where(farmer_groups.c.project_id == project_id)
+        )
+        total = (await self.db.execute(exists_query)).scalar_one() or 0
+        return bool(total)
+
+    async def get_latest_checks_for_attendance_cross_check(
+        self,
+        *,
+        project_id: UUID,
+        search: str | None,
+        training_group_id: UUID | None,
+        verification_source: str,
+    ) -> list[dict]:
+        checks = T("checks")
+        farmers = T("farmers")
+        farmer_groups = T("farmer_groups")
+        training_sessions = T("training_sessions")
+        training_modules = T("training_modules")
+
+        created_at_col = maybe_col(checks, "created_at")
+        date_completed_col = maybe_col(checks, "date_completed")
+        order_by_columns = [
+            date_completed_col.desc().nullslast() if date_completed_col is not None else checks.c.id.desc(),
+            created_at_col.desc().nullslast() if created_at_col is not None else checks.c.id.desc(),
+            checks.c.id.desc(),
+        ]
+
+        ranked_checks = (
+            select(
+                checks.c.id.label("check_id"),
+                checks.c.farmer_id,
+                checks.c.submission_id,
+                checks.c.checker_id,
+                checks.c.observation_id,
+                checks.c.farm_visit_id,
+                checks.c.training_session_id,
+                maybe_col(checks, "date_completed").label("date_completed"),
+                maybe_col(checks, "attended_trainings").label("attended_trainings"),
+                maybe_col(checks, "number_of_trainings_attended").label("number_of_trainings_attended"),
+                maybe_col(checks, "attended_last_months_training").label("attended_last_months_training"),
+                maybe_col(checks, "check_type").label("check_type"),
+                func.row_number().over(partition_by=checks.c.farmer_id, order_by=order_by_columns).label("rn"),
+            )
+            .select_from(checks)
+            .join(training_sessions, checks.c.training_session_id == training_sessions.c.id)
+            .join(farmer_groups, training_sessions.c.farmer_group_id == farmer_groups.c.id)
+            .where(farmer_groups.c.project_id == project_id)
+        ).subquery()
+
+        query = (
+            select(
+                ranked_checks.c.check_id.label("id"),
+                ranked_checks.c.farmer_id,
+                ranked_checks.c.observation_id,
+                ranked_checks.c.farm_visit_id,
+                ranked_checks.c.training_session_id,
+                ranked_checks.c.date_completed,
+                ranked_checks.c.attended_trainings,
+                ranked_checks.c.number_of_trainings_attended,
+                ranked_checks.c.attended_last_months_training,
+                ranked_checks.c.check_type,
+                farmers.c.first_name,
+                maybe_col(farmers, "middle_name").label("middle_name"),
+                farmers.c.last_name,
+                maybe_col(farmers, "tns_id").label("tns_id"),
+                farmer_groups.c.id.label("training_group_id"),
+                farmer_groups.c.ffg_name.label("training_group_name"),
+                training_modules.c.id.label("training_module_id"),
+                maybe_col(training_modules, "module_name").label("training_module_name"),
+                maybe_col(training_modules, "module_number").label("training_module_number"),
+            )
+            .select_from(ranked_checks)
+            .join(farmers, ranked_checks.c.farmer_id == farmers.c.id)
+            .join(training_sessions, ranked_checks.c.training_session_id == training_sessions.c.id)
+            .join(farmer_groups, training_sessions.c.farmer_group_id == farmer_groups.c.id)
+            .outerjoin(training_modules, training_sessions.c.module_id == training_modules.c.id)
+            .where(ranked_checks.c.rn == 1)
+        )
+
+        if training_group_id is not None:
+            query = query.where(farmer_groups.c.id == training_group_id)
+
+        trimmed = (search or "").strip()
+        if trimmed:
+            pattern = f"%{trimmed}%"
+            search_conditions = [farmers.c.first_name.ilike(pattern), farmers.c.last_name.ilike(pattern)]
+            middle_name_col = maybe_col(farmers, "middle_name")
+            if middle_name_col is not None:
+                search_conditions.append(middle_name_col.ilike(pattern))
+            tns_id_col = maybe_col(farmers, "tns_id")
+            if tns_id_col is not None:
+                search_conditions.append(tns_id_col.ilike(pattern))
+            query = query.where(
+                or_(*search_conditions)
+            )
+
+        if verification_source == "farm_visit":
+            query = query.where(ranked_checks.c.farm_visit_id.is_not(None))
+        elif verification_source == "training_observation":
+            query = query.where(ranked_checks.c.observation_id.is_not(None)).where(ranked_checks.c.farm_visit_id.is_(None))
+        elif verification_source == "none":
+            query = query.where(ranked_checks.c.farm_visit_id.is_(None)).where(ranked_checks.c.observation_id.is_(None))
+
+        query = query.order_by(farmers.c.last_name.asc().nullslast(), farmers.c.first_name.asc().nullslast(), ranked_checks.c.check_id.asc())
+        return list((await self.db.execute(query)).mappings().all())
+
+    async def get_attendance_evidence_for_farmers(
+        self,
+        *,
+        project_id: UUID,
+        farmer_ids: list[UUID],
+    ) -> dict[UUID, list[dict]]:
+        if not farmer_ids:
+            return {}
+
+        attendances = T("attendances")
+        training_sessions = T("training_sessions")
+        training_modules = T("training_modules")
+        farmer_groups = T("farmer_groups")
+
+        training_date_expr = func.coalesce(
+            maybe_col(attendances, "date_attended"),
+            maybe_col(training_sessions, "date_session_1"),
+            maybe_col(training_sessions, "date_session_2"),
+        )
+
+        query = (
+            select(
+                attendances.c.farmer_id,
+                attendances.c.id.label("attendance_id"),
+                attendances.c.training_session_id,
+                training_date_expr.label("training_date"),
+                training_modules.c.id.label("module_id"),
+                maybe_col(training_modules, "module_name").label("module_name"),
+                maybe_col(training_modules, "module_number").label("module_number"),
+                maybe_col(training_modules, "current_previous").label("current_previous"),
+                maybe_col(attendances, "status").label("status"),
+            )
+            .select_from(attendances)
+            .join(training_sessions, attendances.c.training_session_id == training_sessions.c.id)
+            .join(farmer_groups, training_sessions.c.farmer_group_id == farmer_groups.c.id)
+            .outerjoin(training_modules, training_sessions.c.module_id == training_modules.c.id)
+            .where(farmer_groups.c.project_id == project_id)
+            .where(attendances.c.farmer_id.in_(farmer_ids))
+            .order_by(training_date_expr.asc().nullslast(), maybe_col(training_modules, "module_number").asc().nullslast(), attendances.c.id.asc())
+        )
+
+        rows = list((await self.db.execute(query)).mappings().all())
+        grouped: dict[UUID, list[dict]] = {}
+        for row in rows:
+            grouped.setdefault(row["farmer_id"], []).append(dict(row))
+        return grouped

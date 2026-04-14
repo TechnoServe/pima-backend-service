@@ -13,6 +13,7 @@ from app.db.session import get_session
 from app.shared.api_errors import DomainError
 
 from .schemas import (
+    AttendanceCrossCheckResponse,
     PaginatedTrainingSessionVerificationResponse,
     SubmitTrainingSessionReviewRequest,
     SubmitTrainingSessionReviewResponse,
@@ -155,4 +156,62 @@ async def export_training_sessions(
         iter([content]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="training_sessions_verification_{project_id}.xlsx"'},
+    )
+
+
+@router.get("/attendance-cross-check", response_model=AttendanceCrossCheckResponse)
+async def list_attendance_cross_check(
+    project_id: UUID = Query(...),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    search: str | None = Query(default=None),
+    training_group_id: UUID | None = Query(default=None),
+    verification_source: str = Query(default="all"),
+    only_mismatches: bool = Query(default=False),
+    db: AsyncSession = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    await _maybe_await(require_project_access(db, user, project_id))
+    service = DataVerificationService(db)
+    return await _service_call(
+        service.list_attendance_cross_check(
+            project_id=project_id,
+            page=page,
+            page_size=page_size,
+            search=search,
+            training_group_id=training_group_id,
+            verification_source=verification_source,
+            only_mismatches=only_mismatches,
+        )
+    )
+
+
+@router.get("/attendance-cross-check/export")
+async def export_attendance_cross_check(
+    project_id: UUID = Query(...),
+    search: str | None = Query(default=None),
+    training_group_id: UUID | None = Query(default=None),
+    verification_source: str = Query(default="all"),
+    only_mismatches: bool = Query(default=False),
+    export_scope: str = Query(default="all"),
+    db: AsyncSession = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    await _maybe_await(require_project_access(db, user, project_id))
+    service = DataVerificationService(db)
+    content = await _service_call(
+        service.export_attendance_cross_check(
+            project_id=project_id,
+            search=search,
+            training_group_id=training_group_id,
+            verification_source=verification_source,
+            only_mismatches=only_mismatches,
+            export_scope=export_scope,
+        )
+    )
+    filename = f"attendance_cross_check_{project_id}_{export_scope}.xlsx"
+    return StreamingResponse(
+        iter([content]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

@@ -41,6 +41,10 @@ class HouseholdSamplingService:
 
         target = self._sampling_target(project_id) # Sampling Target by group
         sampled_household_ids: list[UUID] = [] # This will hold the final list of sampled household
+        
+        print("We have ", len(farmer_groups), " farmer groups.")
+        print("We have ", len(households), " households across those farmer groups.")
+        print("Target sampling count per group:", target)
 
         # 2. For each farmer group, determine which households to sample based on the sampling logic
         for farmer_group in farmer_groups:
@@ -48,6 +52,7 @@ class HouseholdSamplingService:
             group_round = int(farmer_group.get("fv_aa_sampling_round") or 0)
             group_households = households_by_group.get(farmer_group_id, [])
             if not group_households: # If there are no households in the group, skip it
+                print(f"Skipping farmer group {farmer_group_id} because it has no households.")
                 continue
 
             # 2. 1 If all households in the group have been visited, 
@@ -55,6 +60,7 @@ class HouseholdSamplingService:
             # to be eligible for sampling in the new round
             all_visited = all(bool(h.get("visited_for_fv_aa")) for h in group_households)
             if all_visited:
+                print(f"All households in farmer group {farmer_group_id} have been visited. Starting new sampling round.")
                 group_round = await self.repo.increment_farmer_group_sampling_round(farmer_group_id)
                 await self.repo.reset_group_households_for_new_round(
                     farmer_group_id=farmer_group_id,
@@ -71,7 +77,8 @@ class HouseholdSamplingService:
             already_sampled_unvisited = [
                 h for h in group_households if bool(h.get("sampled_for_fv_aa")) and not bool(h.get("visited_for_fv_aa"))
             ]
-            
+            print(f"Farmer group {farmer_group_id} has {len(already_sampled_unvisited)} already sampled but unvisited households.")
+
             # 2.3 If more households need to be sampled to meet the target, 
             # sample from the remaining eligible households that have not been sampled yet, 
             # ensuring that households that have been sampled in previous rounds are prioritized 
@@ -84,6 +91,7 @@ class HouseholdSamplingService:
                 and not bool(h.get("visited_for_fv_aa"))
             ]
 
+            print(f"Farmer group {farmer_group_id} has {len(eligible)} eligible households to sample from.")
             final_sample = list(already_sampled_unvisited)
             if len(final_sample) < target: # If we still need more households to meet the target, and there are eligible households to sample from
                 remaining = target - len(final_sample)
@@ -94,6 +102,7 @@ class HouseholdSamplingService:
             # and add their IDs to the final list of sampled household IDs
             selected_ids = [h["id"] for h in final_sample]
             if selected_ids:
+                print(f"Marking {len(selected_ids)} households as sampled for farmer group {farmer_group_id}.")
                 samples = await self.repo.mark_households_as_sampled(
                     household_ids=selected_ids,
                     sampling_round=group_round,

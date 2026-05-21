@@ -86,7 +86,7 @@ class HouseholdSamplingService:
             eligible = [
                 h
                 for h in group_households
-                if int(h.get("fv_aa_sampling_round") or 0) < group_round
+                if int(h.get("fv_aa_sampling_round") or 0) <= group_round or 0
                 and not bool(h.get("sampled_for_fv_aa"))
                 and not bool(h.get("visited_for_fv_aa"))
             ]

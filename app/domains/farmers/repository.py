@@ -294,6 +294,11 @@ class FarmersRepository:
                 ).label("farmer_number"),
                 FarmerGroup.c.tns_id.label("ffg_id"),
                 FarmerGroup.c.ffg_name.label("training_group"),
+                (
+                    Farmer.c.consent_provided
+                    if "consent_provided" in Farmer.c
+                    else literal(None)
+                ).label("consent_provided"),
                 Farmer.c.status.label("status"),
                 Farmer.c.farmer_status.label("farmer_status"),
                 FT.c.id.label("farmer_trainer_id"),

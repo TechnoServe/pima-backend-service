@@ -80,6 +80,19 @@ def build_tns_id(ffg_id: str, hh_number: int, farmer_number: int) -> str:
     return f"{ffg_id}{pad2(hh_number)}{farmer_number}"
 
 
+def format_consent_provided(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "t", "1", "yes", "y"}:
+        return "Yes"
+    if normalized in {"false", "f", "0", "no", "n"}:
+        return "No"
+    return ""
+
+
 @dataclass(frozen=True)
 class NormalizedRow:
     row_number: int
@@ -248,6 +261,7 @@ class FarmersService:
             "farmer_number",
             "ffg_id",
             "training_group",
+            "consent_provided",
             "status",
             "farmer_status",
             "farmer_trainer",
@@ -306,6 +320,7 @@ class FarmersService:
                 r.get("farmer_number") if r.get("farmer_number") is not None else "",
                 r.get("ffg_id") or "",
                 r.get("training_group") or "",
+                format_consent_provided(r.get("consent_provided")),
                 r.get("status") or "",
                 r.get("farmer_status") or "",
                 r.get("farmer_trainer") or "",

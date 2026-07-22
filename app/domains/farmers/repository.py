@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import alias
 
 from app.db.reflection import get_table
+from app.domains.farm_visits.repository import FarmVisitsRepository
 from app.domains.farmers.models import UploadRun, UploadRowError
 
 
@@ -231,39 +232,42 @@ class FarmersRepository:
         return (await self.db.execute(q)).mappings().all()
 
     # ---------------- Export: base rows mirroring your CSV ----------------
-    async def export_farmers_base_rows(self, project_id: UUID) -> List[dict]:
+    async def export_farmers_base_rows(
+        self,
+        project_id: UUID,
+        *,
+        include_zimbabwe_farm_visit_data: bool = False,
+    ) -> List[dict]:
         Farmer = T("farmers")
         FarmerGroup = T("farmer_groups")
         Household = T("households")
         Location = T("locations")
         Projects = T("projects")
         Users = T("users")
-        FarmVisits = T("farm_visits")
 
         # Define aliases for user tables
         FT = alias(Users, name="ft_user")
         BA = alias(Users, name="ba_user")
-        LatestFarmVisit = alias(FarmVisits, name="latest_farm_visit")
-
-        # Subquery to get the latest farm visit for each household
-        latest_visit_sq = (
-            select(
-                FarmVisits.c.visited_household_id.label("visited_household_id"),
-                FarmVisits.c.id.label("latest_visit_id"),
-                func.row_number()
-                .over(
-                    partition_by=FarmVisits.c.visited_household_id,
-                    order_by=[
-                        FarmVisits.c.date_visited.desc().nullslast(),
-                        FarmVisits.c.updated_at.desc().nullslast(),
-                        FarmVisits.c.created_at.desc().nullslast(),
-                        FarmVisits.c.id.desc(),
-                    ],
-                )
-                .label("visit_rank"),
+        LatestFarmVisit = alias(T("farm_visits"), name="latest_farm_visit")
+        answer_columns = {
+            "primary_farmer_consent": ("consent-primary_farmer_consent", "answer_boolean"),
+            "secondary_farmer_consent": ("consent-secondary_farmer_consent", "answer_boolean"),
+        }
+        if include_zimbabwe_farm_visit_data:
+            answer_columns.update(
+                {
+                    "fv_coffee_tree_numbers": ("updated_number_of_trees", "numeric_answer"),
+                    "reason_for_change_in_number_of_trees": (
+                        "ask_what_happened_to_most_of_the_trees",
+                        "answer_text",
+                    ),
+                }
             )
-            .where(FarmVisits.c.is_deleted.is_(False))
-            .subquery()
+        latest_visit_sq, visit_answers_sq = FarmVisitsRepository(
+            self.db
+        ).latest_visit_and_answers_subqueries(
+            project_id=project_id,
+            answer_columns=answer_columns,
         )
 
         q = (
@@ -294,11 +298,26 @@ class FarmersRepository:
                 ).label("farmer_number"),
                 FarmerGroup.c.tns_id.label("ffg_id"),
                 FarmerGroup.c.ffg_name.label("training_group"),
-                (
-                    Farmer.c.consent_provided
-                    if "consent_provided" in Farmer.c
-                    else literal(None)
+                case(
+                    (Farmer.c.is_primary_household_member.is_(True), visit_answers_sq.c.primary_farmer_consent),
+                    (Farmer.c.is_primary_household_member.is_(False), visit_answers_sq.c.secondary_farmer_consent),
+                    else_=literal(None),
                 ).label("consent_provided"),
+                (
+                    visit_answers_sq.c.fv_coffee_tree_numbers
+                    if include_zimbabwe_farm_visit_data
+                    else literal(None)
+                ).label("fv_coffee_tree_numbers"),
+                (
+                    LatestFarmVisit.c.date_visited
+                    if include_zimbabwe_farm_visit_data
+                    else literal(None)
+                ).label("date_of_latest_farm_visit"),
+                (
+                    visit_answers_sq.c.reason_for_change_in_number_of_trees
+                    if include_zimbabwe_farm_visit_data
+                    else literal(None)
+                ).label("reason_for_change_in_number_of_trees"),
                 Farmer.c.status.label("status"),
                 Farmer.c.farmer_status.label("farmer_status"),
                 FT.c.id.label("farmer_trainer_id"),
@@ -324,6 +343,7 @@ class FarmersRepository:
                 LatestFarmVisit,
                 LatestFarmVisit.c.id == latest_visit_sq.c.latest_visit_id,
             )
+            .outerjoin(visit_answers_sq, visit_answers_sq.c.farm_visit_id == LatestFarmVisit.c.id)
             .outerjoin(Location, FarmerGroup.c.location_id == Location.c.id)
             .outerjoin(FT, FarmerGroup.c.responsible_staff_id == FT.c.id)
             .outerjoin(BA, FT.c.manager_id == BA.c.id)

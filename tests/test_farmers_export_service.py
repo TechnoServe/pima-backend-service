@@ -10,13 +10,18 @@ from app.domains.farmers.service import FarmersService
 
 
 class FakeFarmersExportRepo:
+    def __init__(self, country=None):
+        self.country = country
+        self.include_zimbabwe_farm_visit_data = None
+
     async def project_location_name(self, project_id):
-        return None
+        return self.country
 
     async def export_training_modules(self, project_id):
         return []
 
-    async def export_farmers_base_rows(self, project_id):
+    async def export_farmers_base_rows(self, project_id, *, include_zimbabwe_farm_visit_data=False):
+        self.include_zimbabwe_farm_visit_data = include_zimbabwe_farm_visit_data
         return [
             {
                 "Project": "Project A",
@@ -43,6 +48,9 @@ class FakeFarmersExportRepo:
                 "ffg_id": "FFG-1",
                 "training_group": "Group A",
                 "consent_provided": True,
+                "fv_coffee_tree_numbers": 125,
+                "date_of_latest_farm_visit": "2026-06-15",
+                "reason_for_change_in_number_of_trees": "New trees planted",
                 "status": "Active",
                 "farmer_status": "Active",
                 "farmer_trainer": "Trainer A",
@@ -87,6 +95,30 @@ class FarmersExportServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.cell(row=2, column=consent_idx + 1).value, "Yes")
         self.assertEqual(ws.cell(row=3, column=consent_idx + 1).value, "No")
         self.assertIsNone(ws.cell(row=4, column=consent_idx + 1).value)
+
+    async def test_zimbabwe_export_includes_latest_farm_visit_tree_fields(self):
+        service = FarmersService(db=None)
+        repo = FakeFarmersExportRepo(country="Zimbabwe")
+        service.repo = repo
+
+        data = await service.export_excel(project_id=uuid4())
+        wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        ws = wb.active
+        headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+
+        tree_idx = headers.index("number_of_trees")
+        self.assertEqual(
+            headers[tree_idx + 1 : tree_idx + 4],
+            [
+                "fv_coffee_tree_numbers",
+                "date_of_latest_farm_visit",
+                "reason_for_change_in_number_of_trees",
+            ],
+        )
+        self.assertEqual(ws.cell(row=2, column=tree_idx + 2).value, 125)
+        self.assertEqual(ws.cell(row=2, column=tree_idx + 3).value, "2026-06-15")
+        self.assertEqual(ws.cell(row=2, column=tree_idx + 4).value, "New trees planted")
+        self.assertTrue(repo.include_zimbabwe_farm_visit_data)
 
 
 if __name__ == "__main__":

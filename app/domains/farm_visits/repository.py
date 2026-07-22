@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Mapping
 from uuid import UUID
 
-from sqlalchemy import func, literal, or_, select
+from sqlalchemy import case, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import alias
 
 from app.db.reflection import get_table
 
@@ -54,6 +56,90 @@ class FarmVisitsRepository:
         self.farmers = T("farmers")
         self.users = T("users")
         self.households = T("households")
+
+    def latest_visit_and_answers_subqueries(
+        self,
+        *,
+        project_id: UUID,
+        answer_columns: Mapping[str, tuple[str, str]],
+    ):
+        """Build project-scoped latest-visit and answer-value subqueries.
+
+        ``answer_columns`` maps an output name to a best-practice question key
+        and answer-column name. Keeping this in the farm-visit domain makes the
+        latest-visit semantics reusable without per-household queries.
+        """
+        best_practices = T("fv_best_practices")
+        answers = T("fv_best_practice_answers")
+        visit_household = alias(self.households, name="latest_visit_household")
+        visit_group = alias(self.fg, name="latest_visit_group")
+
+        latest_visits = (
+            select(
+                self.fv.c.visited_household_id.label("visited_household_id"),
+                self.fv.c.id.label("latest_visit_id"),
+                func.row_number()
+                .over(
+                    partition_by=self.fv.c.visited_household_id,
+                    order_by=[
+                        self.fv.c.date_visited.desc().nullslast(),
+                        self.fv.c.updated_at.desc().nullslast(),
+                        self.fv.c.created_at.desc().nullslast(),
+                        self.fv.c.id.desc(),
+                    ],
+                )
+                .label("visit_rank"),
+            )
+            .select_from(
+                self.fv.join(
+                    visit_household,
+                    self.fv.c.visited_household_id == visit_household.c.id,
+                ).join(visit_group, visit_household.c.farmer_group_id == visit_group.c.id)
+            )
+            .where(self.fv.c.is_deleted.is_(False), visit_group.c.project_id == project_id)
+            .subquery()
+        )
+
+        answer_filters = [answers.c.question_key.in_([key for key, _ in answer_columns.values()])]
+        if "is_deleted" in answers.c:
+            answer_filters.append(answers.c.is_deleted.is_(False))
+        if "is_deleted" in best_practices.c:
+            answer_filters.append(best_practices.c.is_deleted.is_(False))
+
+        answer_values = [best_practices.c.farm_visit_id.label("farm_visit_id")]
+        for output_name, (question_key, answer_column) in answer_columns.items():
+            matching_answer = case(
+                (answers.c.question_key == question_key, answers.c[answer_column])
+            )
+            # PostgreSQL does not implement max(boolean). Consent answers are
+            # boolean, while the tree count and change reason can use max to
+            # pivot their single answer value per latest visit.
+            aggregate = (
+                func.bool_or(matching_answer)
+                if answer_column == "answer_boolean"
+                else func.max(matching_answer)
+            )
+            answer_values.append(
+                aggregate.label(output_name)
+            )
+
+        latest_answers = (
+            select(*answer_values)
+            .select_from(
+                best_practices.join(
+                    answers, answers.c.fv_best_practice_id == best_practices.c.id
+                ).join(
+                    latest_visits,
+                    (best_practices.c.farm_visit_id == latest_visits.c.latest_visit_id)
+                    & (latest_visits.c.visit_rank == 1),
+                )
+            )
+            .where(*answer_filters)
+            .group_by(best_practices.c.farm_visit_id)
+            .subquery()
+        )
+
+        return latest_visits, latest_answers
 
     def _columns_and_from(self):
         hh_farmer_group_id = maybe_col(self.households, "farmer_group_id")

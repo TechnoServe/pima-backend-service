@@ -232,9 +232,11 @@ class FarmersService:
 
         hide_coffee_plots = location_name in {"zimbabwe", "ethiopia"}
         use_farm_size_alias = location_name == "ethiopia"
-        print("we re getting here")
         modules = await self.repo.export_training_modules(project_id)
-        base_rows = await self.repo.export_farmers_base_rows(project_id)
+        base_rows = await self.repo.export_farmers_base_rows(
+            project_id,
+            include_zimbabwe_farm_visit_data=is_zimbabwe,
+        )
 
         base_headers = [
             "num",
@@ -245,6 +247,15 @@ class FarmersService:
             "gender",
             "age",
             "number_of_trees",
+            *(
+                [
+                    "fv_coffee_tree_numbers",
+                    "date_of_latest_farm_visit",
+                    "reason_for_change_in_number_of_trees",
+                ]
+                if is_zimbabwe
+                else []
+            ),
            # "number_of_coffee_plots",
             "farm_size",
             "phone_number",
@@ -304,6 +315,17 @@ class FarmersService:
                 r.get("gender") or "",
                 r.get("age") if r.get("age") is not None else "",
                 r.get("number_of_trees") if r.get("number_of_trees") is not None else None,
+                *(
+                    [
+                        r.get("fv_coffee_tree_numbers")
+                        if r.get("fv_coffee_tree_numbers") is not None
+                        else None,
+                        r.get("date_of_latest_farm_visit") or "",
+                        r.get("reason_for_change_in_number_of_trees") or "",
+                    ]
+                    if is_zimbabwe
+                    else []
+                ),
                 # r.get("number_of_coffee_plots") if r.get("number_of_coffee_plots") is not None else None,
                 r.get("farm_size") if r.get("farm_size") is not None else None,
                 r.get("phone_number") if r.get("phone_number") is not None else "",

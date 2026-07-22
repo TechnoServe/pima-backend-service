@@ -256,7 +256,7 @@ class FarmersRepository:
         if include_zimbabwe_farm_visit_data:
             answer_columns.update(
                 {
-                    "fv_coffee_tree_numbers": ("updated_number_of_trees", "numeric_answer"),
+                    "fv_coffee_tree_numbers": ("updated_number_of_trees", "answer_numeric"),
                     "reason_for_change_in_number_of_trees": (
                         "ask_what_happened_to_most_of_the_trees",
                         "answer_text",

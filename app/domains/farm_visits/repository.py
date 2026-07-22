@@ -12,25 +12,6 @@ from sqlalchemy.sql import alias
 from app.db.reflection import get_table
 
 
-# Answer table column names differ between deployed schema revisions.  Callers
-# use the canonical names; this map resolves them to the reflected table.
-ANSWER_COLUMN_ALIASES = {
-    "answer_boolean": ("answer_boolean", "boolean_answer"),
-    "numeric_answer": (
-        "numeric_answer",
-        "number_answer",
-        "answer_numeric",
-        "answer_number",
-        "answer_decimal",
-        "answer_integer",
-        "answer_float",
-        "numeric_value",
-        "number_value",
-    ),
-    "answer_text": ("answer_text", "text_answer", "answer_string"),
-}
-
-
 def T(name: str):
     return get_table(name)
 
@@ -48,17 +29,6 @@ def full_name_expr(tbl):
     last = maybe_col(tbl, "last_name", "lastname", "family_name", "surname")
     parts = [p for p in (first, middle, last) if p is not None]
     return func.trim(func.concat_ws(" ", *parts)) if parts else literal("")
-
-
-def resolve_answer_column(tbl, canonical_name: str):
-    """Get an answer column, allowing known deployed-schema aliases."""
-    for candidate in ANSWER_COLUMN_ALIASES.get(canonical_name, (canonical_name,)):
-        if candidate in tbl.c:
-            return tbl.c[candidate]
-    raise KeyError(
-        f"{tbl.name}: no answer column for {canonical_name}; "
-        f"available columns: {list(tbl.c.keys())}"
-    )
 
 
 @dataclass
@@ -138,9 +108,8 @@ class FarmVisitsRepository:
 
         answer_values = [best_practices.c.farm_visit_id.label("farm_visit_id")]
         for output_name, (question_key, answer_column) in answer_columns.items():
-            value_column = resolve_answer_column(answers, answer_column)
             matching_answer = case(
-                (answers.c.question_key == question_key, value_column)
+                (answers.c.question_key == question_key, answers.c[answer_column])
             )
             # PostgreSQL does not implement max(boolean). Consent answers are
             # boolean, while the tree count and change reason can use max to

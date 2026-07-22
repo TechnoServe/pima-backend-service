@@ -108,10 +108,19 @@ class FarmVisitsRepository:
 
         answer_values = [best_practices.c.farm_visit_id.label("farm_visit_id")]
         for output_name, (question_key, answer_column) in answer_columns.items():
+            matching_answer = case(
+                (answers.c.question_key == question_key, answers.c[answer_column])
+            )
+            # PostgreSQL does not implement max(boolean). Consent answers are
+            # boolean, while the tree count and change reason can use max to
+            # pivot their single answer value per latest visit.
+            aggregate = (
+                func.bool_or(matching_answer)
+                if answer_column == "answer_boolean"
+                else func.max(matching_answer)
+            )
             answer_values.append(
-                func.max(
-                    case((answers.c.question_key == question_key, answers.c[answer_column]))
-                ).label(output_name)
+                aggregate.label(output_name)
             )
 
         latest_answers = (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Dict, List
@@ -915,11 +916,22 @@ class FarmersService:
         if not target_group_id:
             raise ValidationError(f"Unknown ffg_id: {ffg_id}")
 
-        # Find household by (group, number)
-        household_id = await self.repo.find_household_by_group_number(
-            farmer_group_id=target_group_id,
-            household_number=hh_number,
+        # The household TNS ID, rather than the mutable group/number pair, is
+        # the upload key.  This makes every row for the household update the
+        # same record and prevents an old record being selected after an ID
+        # change.
+        household_tns_id = build_household_tns_id(ffg_id, hh_number)
+        household_id = await self.repo.find_household_by_tns_id(
+            project_id=run.project_id,
+            tns_id=household_tns_id,
         )
+
+        # If this farmer's household TNS ID has changed, retain and update its
+        # existing household record.  The next member's row will find that
+        # same record using the newly written TNS ID, so a rename never leaves
+        # behind a duplicate household.
+        if not household_id:
+            household_id = await self.repo.find_household_for_farmer(farmer_id=farmer_id)
 
         if not household_id:
             # Create household + set created_by_id/last_updated_by_id to logged-in user (run.uploaded_by_id)
@@ -1181,19 +1193,31 @@ class FarmersService:
         values: dict = {}
 
         number_of_trees = self._cell(row, header_idx, "number_of_trees")
-        if number_of_trees not in (None, "") and "number_of_trees" in household.c:
-            if self._is_explicit_null_value(number_of_trees):
+        if "number_of_trees" in header_idx and "number_of_trees" in household.c:
+            if number_of_trees in (None, "") or self._is_explicit_null_value(number_of_trees):
                 values["number_of_trees"] = None
             else:
                 values["number_of_trees"] = int(number_of_trees)
 
         coffee_plots = self._cell(row, header_idx, "number_of_coffee_plots")
-        if coffee_plots not in (None, "") and "number_of_coffee_plots" in household.c:
-            values["number_of_coffee_plots"] = None if self._is_explicit_null_value(coffee_plots) else coffee_plots
+        if "number_of_coffee_plots" in header_idx and "number_of_coffee_plots" in household.c:
+            values["number_of_coffee_plots"] = (
+                None
+                if coffee_plots in (None, "") or self._is_explicit_null_value(coffee_plots)
+                else int(coffee_plots)
+            )
 
         farm_size = self._cell(row, header_idx, "farm_size")
-        if farm_size not in (None, "") and "farm_size" in household.c:
-            values["farm_size"] = None if self._is_explicit_null_value(farm_size) else farm_size
+        if "farm_size" in header_idx and "farm_size" in household.c:
+            if farm_size in (None, "") or self._is_explicit_null_value(farm_size):
+                values["farm_size"] = None
+            else:
+                try:
+                    # Preserve the spreadsheet's numeric value exactly rather
+                    # than relying on database-specific float coercion.
+                    values["farm_size"] = Decimal(str(farm_size))
+                except (InvalidOperation, ValueError) as exc:
+                    raise ValidationError("farm_size must be a number") from exc
 
         if values and "updated_at" in household.c:
             values["updated_at"] = datetime.utcnow()
@@ -1247,6 +1271,8 @@ class FarmersService:
         if not error_url and run.error_gcs_object_name:
             error_url = f"{settings.api_prefix}/farmers/uploads/{run.id}/error-report"
 
+        uploaded_by_name = await self.repo.upload_uploader_name(uploaded_by_id=run.uploaded_by_id)
+
         return UploadJob(
             id=run.id,
             project_id=run.project_id,
@@ -1258,7 +1284,7 @@ class FarmersService:
             failed_count=run.failed_count,
             remaining_count=run.remaining_count,
             uploaded_by_id=run.uploaded_by_id,
-            uploaded_by_name=None,
+            uploaded_by_name=uploaded_by_name,
             uploaded_at=run.uploaded_at,
             completed_at=run.completed_at,
             can_retry=is_latest and (run.status == "failed" or has_child),

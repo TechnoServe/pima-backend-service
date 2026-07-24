@@ -544,6 +544,36 @@ class FarmersRepository:
         )
         return (await self.db.execute(q)).scalar_one_or_none()
 
+    async def find_household_by_tns_id(self, *, project_id: UUID, tns_id: str) -> UUID | None:
+        """Return the household identified by its computed TNS ID.
+
+        Household numbers are only meaningful within an FFG and can change when
+        a household is moved.  The computed household TNS ID is the upload
+        identity, so constrain it to the project through its farmer group.
+        """
+        Household = T("households")
+        FarmerGroup = T("farmer_groups")
+        if "tns_id" not in Household.c:
+            return None
+        q = (
+            select(Household.c.id)
+            .select_from(Household)
+            .join(FarmerGroup, Household.c.farmer_group_id == FarmerGroup.c.id)
+            .where(FarmerGroup.c.project_id == project_id, Household.c.tns_id == tns_id)
+            .limit(1)
+        )
+        return (await self.db.execute(q)).scalar_one_or_none()
+
+    async def find_household_for_farmer(self, *, farmer_id: UUID) -> UUID | None:
+        Farmer = T("farmers")
+        if "household_id" not in Farmer.c:
+            return None
+        return (
+            await self.db.execute(
+                select(Farmer.c.household_id).where(Farmer.c.id == farmer_id).limit(1)
+            )
+        ).scalar_one_or_none()
+
     
     async def create_household(self, values: dict):
         Household = T("households")
@@ -617,6 +647,21 @@ class FarmersRepository:
     async def update_household(self, *, household_id: UUID, values: dict) -> None:
         Household = T("households")
         await self.db.execute(update(Household).where(Household.c.id == household_id).values(**values))
+
+    async def upload_uploader_name(self, *, uploaded_by_id: UUID | None) -> str | None:
+        if not uploaded_by_id:
+            return None
+
+        Users = T("users")
+        first = next((Users.c[c] for c in ("first_name", "firstname", "given_name") if c in Users.c), None)
+        last = next((Users.c[c] for c in ("last_name", "lastname", "family_name", "surname") if c in Users.c), None)
+        if first is None and last is None:
+            return None
+
+        name = func.trim(func.concat_ws(" ", first, last))
+        return (
+            await self.db.execute(select(name).where(Users.c.id == uploaded_by_id).limit(1))
+        ).scalar_one_or_none()
 
     # ---------------- CommCare flagging ----------------
     async def flag_farmers_send_to_commcare(self, *, project_id: UUID) -> int:

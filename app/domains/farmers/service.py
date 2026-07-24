@@ -1193,21 +1193,23 @@ class FarmersService:
         values: dict = {}
 
         number_of_trees = self._cell(row, header_idx, "number_of_trees")
-        if number_of_trees not in (None, "") and "number_of_trees" in household.c:
-            if self._is_explicit_null_value(number_of_trees):
+        if "number_of_trees" in header_idx and "number_of_trees" in household.c:
+            if number_of_trees in (None, "") or self._is_explicit_null_value(number_of_trees):
                 values["number_of_trees"] = None
             else:
                 values["number_of_trees"] = int(number_of_trees)
 
         coffee_plots = self._cell(row, header_idx, "number_of_coffee_plots")
-        if coffee_plots not in (None, "") and "number_of_coffee_plots" in household.c:
+        if "number_of_coffee_plots" in header_idx and "number_of_coffee_plots" in household.c:
             values["number_of_coffee_plots"] = (
-                None if self._is_explicit_null_value(coffee_plots) else int(coffee_plots)
+                None
+                if coffee_plots in (None, "") or self._is_explicit_null_value(coffee_plots)
+                else int(coffee_plots)
             )
 
         farm_size = self._cell(row, header_idx, "farm_size")
-        if farm_size not in (None, "") and "farm_size" in household.c:
-            if self._is_explicit_null_value(farm_size):
+        if "farm_size" in header_idx and "farm_size" in household.c:
+            if farm_size in (None, "") or self._is_explicit_null_value(farm_size):
                 values["farm_size"] = None
             else:
                 try:

@@ -62,6 +62,29 @@ class FarmersUploadServiceTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    def test_empty_shared_household_metrics_clear_existing_values(self):
+        service = FarmersService(db=None)
+        headers = {
+            "number_of_trees": 0,
+            "number_of_coffee_plots": 1,
+            "farm_size": 2,
+        }
+
+        with patch("app.domains.farmers.service.T", return_value=self.households):
+            metrics = service._household_shared_metrics(
+                row=(None, "", None),
+                header_idx=headers,
+            )
+
+        self.assertEqual(
+            metrics,
+            {
+                "number_of_trees": None,
+                "number_of_coffee_plots": None,
+                "farm_size": None,
+            },
+        )
+
     async def test_upload_job_includes_uploader_name(self):
         run = UploadRun(
             id=uuid4(),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import uuid4
 from unittest.mock import patch
 
@@ -27,6 +28,14 @@ class UploadJobRepo:
 
     async def upload_uploader_name(self, *, uploaded_by_id):
         return "Ada Lovelace" if uploaded_by_id else None
+
+
+class CommitTrackingDb:
+    def __init__(self):
+        self.commits = 0
+
+    async def commit(self):
+        self.commits += 1
 
 
 class FarmersUploadServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -84,6 +93,27 @@ class FarmersUploadServiceTests(unittest.IsolatedAsyncioTestCase):
                 "farm_size": None,
             },
         )
+
+    async def test_fail_run_is_terminal_and_has_no_remaining_rows(self):
+        db = CommitTrackingDb()
+        service = FarmersService(db=db)
+        run = SimpleNamespace(
+            status="processing",
+            completed_at=None,
+            progress=99,
+            total_rows=953,
+            failed_count=1,
+            remaining_count=3,
+            meta={},
+        )
+
+        await service._fail_run(run, message="database error")
+
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.progress, 100)
+        self.assertEqual(run.remaining_count, 0)
+        self.assertEqual(run.meta["error"], "database error")
+        self.assertEqual(db.commits, 1)
 
     async def test_upload_job_includes_uploader_name(self):
         run = UploadRun(

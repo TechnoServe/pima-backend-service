@@ -820,7 +820,14 @@ class FarmersService:
             run.completed_at = datetime.utcnow()
             await self.db.commit()
         except Exception as exc:
-            await self._fail_run(run, message=str(exc))
+            # A failed statement leaves the session transaction unusable.  Roll
+            # it back, then reload the run before marking it terminal; without
+            # this, the status update can fail too and the worker will pick the
+            # same "processing" run again on every cron tick.
+            await self.db.rollback()
+            failed_run = await self.repo.get_upload_run(upload_run_id)
+            if failed_run:
+                await self._fail_run(failed_run, message=str(exc))
 
     async def _prefetch_group_ids_for_ffg_ids(self, *, project_id: UUID, ffg_ids: list[str], out_map: dict[str, UUID]) -> None:
         FarmerGroup = T("farmer_groups")
@@ -1246,9 +1253,9 @@ class FarmersService:
         run.status = "failed"
         run.completed_at = datetime.utcnow()
         run.progress = 100
+        run.remaining_count = 0
         if failed_rows is not None:
             run.failed_count = failed_rows
-            run.remaining_count = 0
             run.total_rows = max(run.total_rows, failed_rows)
         run.meta = {**(run.meta or {}), "error": message}
         await self.db.commit()
